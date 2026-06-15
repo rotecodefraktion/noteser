@@ -136,6 +136,87 @@ export interface GitHostProvider {
 
 Auth is **not** on this interface (it differs too much per host); see below.
 
+## Sequence diagrams
+
+### Full sync: one orchestrator, provider injected
+
+The pull→apply→push pipeline is host-agnostic. It selects a provider from
+the active connection and never branches on host kind itself — only the
+provider does.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Hook as useGitSync (shared)
+    participant Pull as syncPull (shared)
+    participant Apply as syncApply (shared)
+    participant Push as syncPush (shared)
+    participant P as GitHostProvider
+    participant API as Host API
+
+    User->>Hook: Sync
+    Note over Hook: pick provider from connection<br/>(github | forgejo)
+
+    Hook->>Pull: pull(provider, repo, notes)
+    Pull->>P: getBranchHeadSha / getCommitTreeSha / getTreeMap
+    P->>API: git-data READ (refs, commit, tree)
+    API-->>P: head + tree map
+    Pull->>P: getBlobContent (lazy, per changed file)
+    P->>API: git-data READ (blobs)
+    API-->>Pull: remote contents
+    Note over Pull: 3-way merge / classify<br/>(host-agnostic, SHAs + content)
+    Pull-->>Hook: classifications
+
+    Hook->>Apply: apply non-conflicts (local)
+    Note over Hook: conflicts → merge tabs
+
+    Hook->>Push: push(provider, notes, folders)
+    Push->>P: commitChanges(repo, FileChange[])
+    P->>API: host-specific write (see below)
+    API-->>P: new commit sha
+    P-->>Hook: SyncOutcome
+```
+
+### `commitChanges`: the one host divergence
+
+Same call, two implementations. `syncPush` builds a host-neutral
+`FileChange[]`; the provider turns it into commits its host's way.
+
+```mermaid
+sequenceDiagram
+    participant Push as syncPush (shared)
+    participant P as GitHostProvider
+    participant API as Host API
+
+    Note over Push: build FileChange[]<br/>(create / update / delete, +sha)
+    Push->>P: commitChanges(repo, {parentSha, branch, message, changes})
+
+    alt GitHubProvider
+        loop each changed/new file
+            P->>API: POST /git/blobs
+            API-->>P: blobSha
+        end
+        P->>API: POST /git/trees (baseTree + entries; delete = sha:null)
+        API-->>P: treeSha
+        P->>API: POST /git/commits (parent=parentSha)
+        API-->>P: commitSha
+        P->>API: PATCH /git/refs/heads/{branch} (force:false → FF check)
+        API-->>P: ok
+    else ForgejoProvider
+        P->>API: POST /contents (ChangeFiles: all files in one batch, branch, message)
+        Note right of API: creates blobs+tree+commit<br/>server-side, advances branch;<br/>inits empty repo on first push
+        API-->>P: commitSha
+    end
+
+    P-->>Push: CommitResult{ commitSha, commitUrl }
+```
+
+The GitHub branch is multi-request (N blobs + tree + commit + ref) and
+relies on `force:false` for the optimistic fast-forward check. The Forgejo
+branch is a single request; the optimistic-concurrency story there is an
+open item (does `ChangeFiles` reject when the branch moved under us? — to
+confirm in phase 3, otherwise re-pull-and-retry on conflict).
+
 ## What stays shared vs host-specific
 
 | Layer | Disposition |
@@ -237,6 +318,12 @@ the Forgejo-specific risk is isolated to phase 3.
   `from_path` where possible, else delete+create.
 - **Older Gitea (<1.17)** lacks the `ChangeFiles` batch; version-probe and
   fall back to per-file `PUT /contents/{path}` (not needed for Codeberg).
+- **Optimistic concurrency on Forgejo.** GitHub's `updateBranchRef(force:false)`
+  rejects a non-fast-forward push, which is how we detect "branch moved under
+  us". Confirm whether `ChangeFiles` fails when the branch advanced past
+  `parentSha`; if it can't express that precondition, fall back to a
+  re-pull-and-retry on the next sync (the merge engine already handles the
+  reconciliation).
 
 ## Test strategy
 
