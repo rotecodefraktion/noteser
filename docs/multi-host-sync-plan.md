@@ -155,23 +155,23 @@ sequenceDiagram
     participant API as Host API
 
     User->>Hook: Sync
-    Note over Hook: pick provider from connection<br/>(github | forgejo)
+    Note over Hook: pick provider from connection<br/>(github or forgejo)
 
     Hook->>Pull: pull(provider, repo, notes)
-    Pull->>P: getBranchHeadSha / getCommitTreeSha / getTreeMap
+    Pull->>P: getBranchHeadSha, getCommitTreeSha, getTreeMap
     P->>API: git-data READ (refs, commit, tree)
-    API-->>P: head + tree map
+    API-->>P: head and tree map
     Pull->>P: getBlobContent (lazy, per changed file)
     P->>API: git-data READ (blobs)
     API-->>Pull: remote contents
-    Note over Pull: 3-way merge / classify<br/>(host-agnostic, SHAs + content)
+    Note over Pull: 3-way merge and classify<br/>host-agnostic, on SHAs and content
     Pull-->>Hook: classifications
 
     Hook->>Apply: apply non-conflicts (local)
-    Note over Hook: conflicts → merge tabs
+    Note over Hook: conflicts open merge tabs
 
     Hook->>Push: push(provider, notes, folders)
-    Push->>P: commitChanges(repo, FileChange[])
+    Push->>P: commitChanges(repo, FileChange list)
     P->>API: host-specific write (see below)
     API-->>P: new commit sha
     P-->>Hook: SyncOutcome
@@ -188,27 +188,27 @@ sequenceDiagram
     participant P as GitHostProvider
     participant API as Host API
 
-    Note over Push: build FileChange[]<br/>(create / update / delete, +sha)
-    Push->>P: commitChanges(repo, {parentSha, branch, message, changes})
+    Note over Push: build FileChange list<br/>create, update, delete, plus sha
+    Push->>P: commitChanges(repo, parentSha, branch, message, changes)
 
     alt GitHubProvider
-        loop each changed/new file
-            P->>API: POST /git/blobs
+        loop each changed or new file
+            P->>API: POST git-data blobs
             API-->>P: blobSha
         end
-        P->>API: POST /git/trees (baseTree + entries; delete = sha:null)
+        P->>API: POST git-data trees (baseTree plus entries, delete is sha null)
         API-->>P: treeSha
-        P->>API: POST /git/commits (parent=parentSha)
+        P->>API: POST git-data commits (parent is parentSha)
         API-->>P: commitSha
-        P->>API: PATCH /git/refs/heads/{branch} (force:false → FF check)
+        P->>API: PATCH refs heads branch (force false, fast-forward check)
         API-->>P: ok
     else ForgejoProvider
-        P->>API: POST /contents (ChangeFiles: all files in one batch, branch, message)
-        Note right of API: creates blobs+tree+commit<br/>server-side, advances branch;<br/>inits empty repo on first push
+        P->>API: POST contents (ChangeFiles, all files in one batch)
+        Note right of API: server builds blobs, tree, commit<br/>advances branch, inits empty repo on first push
         API-->>P: commitSha
     end
 
-    P-->>Push: CommitResult{ commitSha, commitUrl }
+    P-->>Push: CommitResult (commitSha, commitUrl)
 ```
 
 The GitHub branch is multi-request (N blobs + tree + commit + ref) and
