@@ -10,6 +10,7 @@ import { VaultLockedError } from '@/utils/vaultKey'
 // prefetch). pullFromZipball still lives in githubSync.ts for callers/tests.
 import { syncToGitHub, pullFromGitHub } from '@/utils/githubSync'
 import type { PullClassification, SyncResult, GitPathUpdate } from '@/utils/githubSync'
+import { GitHubProvider } from '@/utils/gitHost/githubProvider'
 import { getValidGitHubToken, withTokenRefresh, ReconnectRequiredError } from '@/utils/tokenRefresh'
 import { applyNonConflicts, applyAttachmentClassifications } from '@/utils/syncApply'
 import { fillShellsInBackground } from '@/utils/backgroundFill'
@@ -242,7 +243,7 @@ async function runPush(
   }
 
   const outcome = await syncToGitHub({
-    token, repo, notes, folders, commitMessage,
+    token, provider: new GitHubProvider(token), repo, notes, folders, commitMessage,
     vaultSettings: vaultSettingsInput,
     // gi9n: thread the editor's draft through. Null = no pending edit;
     // syncToGitHub will leave the remote `.gitignore` alone.

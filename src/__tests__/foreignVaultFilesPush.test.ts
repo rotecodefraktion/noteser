@@ -15,6 +15,7 @@
  */
 
 import { syncToGitHub, _resetUploadedShaCache } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import type { Note, Folder, SyncRepo } from '@/types'
 
 jest.mock('../utils/attachments', () => ({
@@ -121,6 +122,7 @@ describe('syncToGitHub — foreign-kind notes never appear in the push plan', ()
 
     const outcome = await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [foreignMirror],
       folders: [] as Folder[],
@@ -161,6 +163,7 @@ describe('syncToGitHub — foreign-kind notes never appear in the push plan', ()
 
     const outcome = await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [foreignMirror],
       folders: [] as Folder[],
@@ -191,6 +194,7 @@ describe('syncToGitHub — foreign-kind notes never appear in the push plan', ()
 
     const outcome = await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [md, foreignMirror],
       folders: [] as Folder[],

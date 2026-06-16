@@ -37,16 +37,44 @@ export interface FileChange {
   sha?: string
 }
 
+// Host-agnostic progress for a single commitChanges call. A multi-request
+// host (GitHub: N blobs + tree + commit + ref) reports each phase; a
+// single-request host (Forgejo ChangeFiles) may only report `committing`.
+// `uploading-blobs` carries running counts so the caller can render
+// "uploaded 47 / 200 (3 skipped)". The caller translates these back into
+// whatever external progress shape it exposes.
+export type CommitProgress =
+  | { phase: 'uploading-blobs'; uploaded: number; total: number; skipped: number }
+  | { phase: 'building-tree' }
+  | { phase: 'committing' }
+  | { phase: 'updating-ref' }
+
 export interface CommitRequest {
   branch: string
   parentSha: string // expected current head (optimistic FF)
   message: string
   changes: FileChange[]
+  // Optional host-agnostic progress hook. Hosts emit the phases they
+  // actually perform; absent phases simply aren't reported.
+  onProgress?: (event: CommitProgress) => void
 }
 
 export interface CommitResult {
   commitSha: string
   commitUrl: string | null
+  // False when the host determined the change set was a no-op (e.g. the
+  // built tree was byte-identical to the parent's tree, so no commit was
+  // created and the branch was left untouched). commitSha then equals the
+  // parent sha. True when a real commit advanced the branch.
+  committed: boolean
+  // Paths whose create/update content was actually transmitted to the host
+  // (as opposed to satisfied from a same-session content cache). On GitHub a
+  // path is absent here when its blob was already uploaded earlier this tab
+  // session (a token-refresh retry) and reused. Hosts with no content cache
+  // list every create/update path. The caller uses this to mirror the prior
+  // syncPush behavior of only recording a path-metadata update for paths it
+  // genuinely pushed in this attempt.
+  uploadedPaths: string[]
 }
 
 export interface GitHostProvider {

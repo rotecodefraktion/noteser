@@ -32,10 +32,15 @@ jest.mock('../utils/github', () => ({
   createTree: jest.fn(),
   createCommit: jest.fn(),
   updateBranchRef: jest.fn(),
+  // commitChanges computes content-addressable blob SHAs locally to key its
+  // upload cache and to compare against the parent tree. Stubbed to a
+  // content-derived string so distinct content yields distinct cache keys.
+  gitBlobSha: jest.fn(async (content: string) => `sha:${content}`),
+  gitBlobShaBytes: jest.fn(async (bytes: Uint8Array) => `sha-bytes:${bytes.length}`),
 }))
 
 import * as github from '../utils/github'
-import { GitHubProvider } from '../utils/gitHost/githubProvider'
+import { GitHubProvider, _resetUploadedShaCache } from '../utils/gitHost/githubProvider'
 
 const mock = github as jest.Mocked<typeof github>
 
@@ -57,6 +62,10 @@ function makeGitHubRepo(over: Partial<GitHubRepo> = {}): GitHubRepo {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // The upload cache is module-level and persists across commitChanges calls
+  // (so a token-refresh retry skips already-uploaded blobs). Reset it between
+  // tests so cache state from one test can't leak into the next.
+  _resetUploadedShaCache()
 })
 
 describe('GitHubProvider — identity', () => {
@@ -208,7 +217,73 @@ describe('GitHubProvider — commitChanges blob→tree→commit→ref', () => {
     expect(result).toEqual({
       commitSha: 'new-commit',
       commitUrl: 'https://github.com/octocat/vault/commit/new-commit',
+      committed: true,
+      // Both create/update blobs were freshly uploaded; the delete carries no blob.
+      uploadedPaths: ['new.md', 'old.md'],
     })
+  })
+
+  test('no-op-tree skip: when the built tree equals the parent tree, no commit is created', async () => {
+    // createTree resolves to the SAME sha the parent commit's tree resolves
+    // to — the change set was a no-op (e.g. content round-tripped to identical
+    // bytes). The push must skip commit + ref and report committed:false.
+    mock.getCommitTreeSha.mockResolvedValue('same-tree')
+    mock.createBlob.mockResolvedValue('blob-x')
+    mock.createTree.mockResolvedValue('same-tree')
+
+    const p = new GitHubProvider(TOKEN)
+    const result = await p.commitChanges(REPO, {
+      branch: 'main',
+      parentSha: 'parent-commit',
+      message: 'noop',
+      changes: [{ op: 'update', path: 'a.md', content: '# a' }],
+    })
+
+    expect(mock.createTree).toHaveBeenCalledTimes(1)
+    expect(mock.createCommit).not.toHaveBeenCalled()
+    expect(mock.updateBranchRef).not.toHaveBeenCalled()
+    expect(result).toEqual({
+      commitSha: 'parent-commit',
+      commitUrl: null,
+      committed: false,
+      uploadedPaths: ['a.md'],
+    })
+  })
+
+  test('upload cache: a second commit of the same content skips the blob POST', async () => {
+    mock.getCommitTreeSha.mockResolvedValue('base-tree')
+    mock.createBlob.mockResolvedValue('blob-1')
+    mock.createTree.mockResolvedValueOnce('tree-1')
+    mock.createCommit.mockResolvedValue({ sha: 'c1', html_url: 'u1' })
+    mock.updateBranchRef.mockResolvedValue(undefined)
+
+    const p = new GitHubProvider(TOKEN)
+    // First commit fails AFTER the blob upload but before clearing the cache,
+    // by throwing on createCommit — so the uploaded blob sha stays cached.
+    mock.createCommit.mockRejectedValueOnce(new Error('boom'))
+    await expect(
+      p.commitChanges(REPO, {
+        branch: 'main',
+        parentSha: 'parent',
+        message: 'first',
+        changes: [{ op: 'create', path: 'n.md', content: '# n' }],
+      }),
+    ).rejects.toThrow('boom')
+    expect(mock.createBlob).toHaveBeenCalledTimes(1)
+
+    // Retry with the same content: the blob is cached → no second POST, and it
+    // is reported as skipped (not uploaded) so the caller suppresses the
+    // redundant path-metadata update.
+    mock.createCommit.mockResolvedValue({ sha: 'c2', html_url: 'u2' })
+    const result = await p.commitChanges(REPO, {
+      branch: 'main',
+      parentSha: 'parent',
+      message: 'retry',
+      changes: [{ op: 'create', path: 'n.md', content: '# n' }],
+    })
+    expect(mock.createBlob).toHaveBeenCalledTimes(1) // still only the first POST
+    expect(result.committed).toBe(true)
+    expect(result.uploadedPaths).toEqual([]) // served from cache, not transmitted
   })
 
   test('binary file changes go through createBlobBinary, not createBlob', async () => {

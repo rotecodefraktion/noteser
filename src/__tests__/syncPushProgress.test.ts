@@ -18,6 +18,7 @@
  */
 
 import { syncToGitHub, _resetUploadedShaCache } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import type { PushProgress } from '../utils/githubSync'
 import type { Note, Folder, SyncRepo } from '@/types'
 
@@ -114,6 +115,7 @@ describe('syncToGitHub — push progress events', () => {
     const phases: PushProgress[] = []
     await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [makeNote('1', 'A', 'aaaa'), makeNote('2', 'B', 'bbbb')],
       folders: [] as Folder[],
@@ -158,6 +160,7 @@ describe('syncToGitHub — push progress events', () => {
     // First attempt — expect a thrown error mid-loop.
     await expect(syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes,
       folders: [] as Folder[],
@@ -180,6 +183,7 @@ describe('syncToGitHub — push progress events', () => {
 
     await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes,
       folders: [] as Folder[],
@@ -194,13 +198,13 @@ describe('syncToGitHub — push progress events', () => {
     const fetchMock = makeFetchMock()
     global.fetch = fetchMock as unknown as typeof fetch
     const notes = [makeNote('1', 'A', 'one')]
-    await syncToGitHub({ token: 't', repo: REPO, notes, folders: [] as Folder[] })
+    await syncToGitHub({ token: 't', provider: new GitHubProvider('t'), repo: REPO, notes, folders: [] as Folder[] })
 
     // Force a deliberate cache miss by changing the remote tree's view.
     // The 2nd push should upload again because the cache is empty.
     const fetchMock2 = makeFetchMock()
     global.fetch = fetchMock2 as unknown as typeof fetch
-    await syncToGitHub({ token: 't', repo: REPO, notes, folders: [] as Folder[] })
+    await syncToGitHub({ token: 't', provider: new GitHubProvider('t'), repo: REPO, notes, folders: [] as Folder[] })
     const blobPosts2 = fetchMock2.mock.calls.filter(c => String(c[0]).endsWith('/git/blobs') && (c[1] as RequestInit | undefined)?.method === 'POST').length
     expect(blobPosts2).toBe(1)
   })

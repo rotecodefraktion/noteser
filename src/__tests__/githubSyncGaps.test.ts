@@ -67,6 +67,7 @@ import {
   pullFromGitHub,
   syncToGitHub,
 } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import type { Note, Folder, SyncRepo } from '@/types'
 
 const REPO: SyncRepo = { owner: 'me', name: 'vault', branch: 'main', isPrivate: false }
@@ -549,7 +550,7 @@ describe('syncToGitHub — special character filename handling', () => {
     mockGitBlobSha.mockResolvedValue('sha-local')
 
     const local = [note({ id: '1', title: 'R&D Work', content: 'body' })]
-    await syncToGitHub({ token: 't', repo: REPO, notes: local, folders: [] })
+    await syncToGitHub({ token: 't', provider: new GitHubProvider('t'), repo: REPO, notes: local, folders: [] })
 
     expect(mockCreateBlob).toHaveBeenCalledTimes(1)
     expect(mockCreateTree).toHaveBeenCalledTimes(1)
@@ -573,7 +574,7 @@ describe('syncToGitHub — special character filename handling', () => {
         gitRemoteBaseSha: 'sha-existing',
       }),
     ]
-    const result = await syncToGitHub({ token: 't', repo: REPO, notes: local, folders: [] })
+    const result = await syncToGitHub({ token: 't', provider: new GitHubProvider('t'), repo: REPO, notes: local, folders: [] })
 
     expect(result.result.unchanged).toBe(true)
     expect(mockCreateBlob).not.toHaveBeenCalled()

@@ -54,6 +54,7 @@ jest.mock('../utils/github', () => ({
 }))
 
 import { pullFromGitHub } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import type { Note, Folder, SyncRepo } from '@/types'
 
 const REPO: SyncRepo = { owner: 'me', name: 'vault', branch: 'main', isPrivate: false }
@@ -314,7 +315,7 @@ test('bulk-delete + sync emits sha:null tree entries for every deleted note', as
     note({ id: '2', title: 'Note B', content: 'b body', gitPath: 'Note B.md', gitLastPushedSha: 'sha-b', isDeleted: true }),
   ]
 
-  const result = await syncToGitHub({ token: 't', repo: REPO, notes: local, folders: [] })
+  const result = await syncToGitHub({ token: 't', provider: new GitHubProvider('t'), repo: REPO, notes: local, folders: [] })
 
   // The push step emitted a tree with TWO sha:null deletions, no blob uploads.
   expect(mockCreateBlob).not.toHaveBeenCalled()
