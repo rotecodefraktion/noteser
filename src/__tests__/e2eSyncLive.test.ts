@@ -156,8 +156,11 @@ import { githubFetch } from '../utils/githubFetch'
 import type { Note, SyncRepo } from '@/types'
 
 const TOKEN = process.env.GITHUB_TEST_TOKEN
-const OWNER = 'ipapakonstantinou'
-const REPO_NAME = 'noteser-vault'
+// Live harness target. Defaults to the upstream test vault; override via env
+// to run against a fork's own repo (e.g. GITHUB_TEST_OWNER=rotecodefraktion
+// GITHUB_TEST_REPO=demovault).
+const OWNER = process.env.GITHUB_TEST_OWNER || 'ipapakonstantinou'
+const REPO_NAME = process.env.GITHUB_TEST_REPO || 'noteser-vault'
 const BASE_BRANCH = 'main'
 const HARNESS_BRANCH = 'claude-harness'
 
