@@ -6,6 +6,13 @@
 // class binds the token at construction and maps a `SyncRepo {owner,name,
 // branch}` onto those positional args.
 //
+// Tree/blob reads delegate to the ETag-conditional wrappers in
+// `../githubETagCache` (which themselves fall back to the bare github.ts
+// helpers on a cold cache), so GitHub's #69 conditional-request caching is
+// encapsulated here and available to any caller of the provider — the pull
+// pipeline never has to know about it. `getBlobBytes` has no conditional
+// variant and stays on the bare helper.
+//
 // `commitChanges` reproduces the existing push flow that `githubSync/
 // syncPush.ts` used to perform inline (createBlob → createTree →
 // createCommit → updateBranchRef), mirroring its semantics: deletes are
@@ -20,9 +27,8 @@ import type { SyncRepo, GitHubRepo } from '@/types'
 import {
   getBranchRefSha,
   getCommitTreeSha,
-  getTreeMap,
-  getBlobContent,
   getBlobBytes,
+  fetchZipball,
   listUserRepos,
   listRepoBranches,
   getRepo as githubGetRepo,
@@ -36,6 +42,16 @@ import {
   gitBlobShaBytes,
   type GitTreeEntry,
 } from '../github'
+// Pull-side tree/blob reads go through the ETag-conditional wrappers so a
+// re-sync of an unchanged repo comes back as 304s and doesn't burn quota
+// (#69). Encapsulating them here keeps the optimization host-agnostic — the
+// pull pipeline only ever calls provider.getTreeMap / provider.getBlobContent
+// and never branches on host. There is no conditional binary variant, so
+// getBlobBytes stays on the bare helper.
+import {
+  getBlobContentConditional,
+  getTreeMapConditional,
+} from '../githubETagCache'
 import type {
   GitHostProvider,
   HostKind,
@@ -126,15 +142,20 @@ export class GitHubProvider implements GitHostProvider {
   }
 
   getTreeMap(repo: SyncRepo, treeSha: string): Promise<Map<string, string>> {
-    return getTreeMap(this.token, repo.owner, repo.name, treeSha)
+    return getTreeMapConditional(this.token, repo, treeSha)
   }
 
   getBlobContent(repo: SyncRepo, sha: string): Promise<string> {
-    return getBlobContent(this.token, repo.owner, repo.name, sha)
+    return getBlobContentConditional(this.token, repo, sha)
   }
 
   getBlobBytes(repo: SyncRepo, sha: string): Promise<Uint8Array> {
     return getBlobBytes(this.token, repo.owner, repo.name, sha)
+  }
+
+  // --- bulk archive (first-clone fast path) ---
+  fetchArchive(repo: SyncRepo, ref: string): Promise<ArrayBuffer> {
+    return fetchZipball(this.token, repo.owner, repo.name, ref)
   }
 
   // --- git-data WRITE ---

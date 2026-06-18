@@ -94,6 +94,13 @@ export interface GitHostProvider {
   getBlobContent(repo: SyncRepo, sha: string): Promise<string>
   getBlobBytes(repo: SyncRepo, sha: string): Promise<Uint8Array>
 
+  // --- bulk archive (first-clone fast path) ---
+  // Optional whole-repo archive download for the first-clone fast path
+  // (GitHub: zipball; Forgejo: GET /archive/{ref}.zip, or omit). Returns the
+  // raw archive bytes; the caller unzips. Hosts without an archive endpoint
+  // leave this undefined and the caller falls back to the per-blob pull.
+  fetchArchive?(repo: SyncRepo, ref: string): Promise<ArrayBuffer>
+
   // --- git-data WRITE (the one real divergence) ---
   commitChanges(repo: SyncRepo, req: CommitRequest): Promise<CommitResult>
 }
