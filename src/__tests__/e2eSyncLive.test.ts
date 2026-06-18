@@ -328,7 +328,7 @@ maybe('e2e GitHub sync (live)', () => {
     expect(baselineHeadSha).toMatch(/^[0-9a-f]{40}$/)
     log(`[scenario 1] reset ${HARNESS_BRANCH} to main @ ${baselineHeadSha.slice(0, 8)}`)
 
-    const pull = await pullFromGitHub({ token: TOKEN!, repo, notes: [], folders: [] })
+    const pull = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes: [], folders: [] })
     // With empty local state every remote .md classifies remoteCreated; there
     // must be no spurious local-side entries (remoteDeleted/conflict).
     const kinds = pull.classifications.reduce<Record<string, number>>((acc, c) => {
@@ -385,7 +385,7 @@ maybe('e2e GitHub sync (live)', () => {
       // Mirror the production dispatch: a true first clone passes EMPTY local
       // state and isFirstClone=true, which now emits SHELLS (no body fetch).
       pull = await pullFromGitHub({
-        token: TOKEN!,
+        provider: new GitHubProvider(TOKEN!),
         repo,
         notes: [],
         folders: [],
@@ -454,7 +454,7 @@ maybe('e2e GitHub sync (live)', () => {
     }) as typeof fetch
     let pull: Awaited<ReturnType<typeof pullFromGitHub>>
     try {
-      pull = await pullFromGitHub({ token: TOKEN!, repo, notes: shells, folders: [] })
+      pull = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes: shells, folders: [] })
     } finally {
       globalThis.fetch = realFetch
     }
@@ -504,7 +504,7 @@ maybe('e2e GitHub sync (live)', () => {
 
     // (d) After fill, a re-pull still reads `unchanged` — normal behaviour
     //     resumed, no phantom local edit, no re-upload churn.
-    const pull2 = await pullFromGitHub({ token: TOKEN!, repo, notes: shells, folders: [] })
+    const pull2 = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes: shells, folders: [] })
     const mine2 = pull2.classifications.filter(
       c => 'noteId' in c && shellIds.has((c as { noteId: string }).noteId),
     )
@@ -515,7 +515,7 @@ maybe('e2e GitHub sync (live)', () => {
   })
 
   test('scenario 3: re-pull with the 3 notes as local state → all unchanged (no misclassification)', async () => {
-    const pull = await pullFromGitHub({ token: TOKEN!, repo, notes, folders: [] })
+    const pull = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes, folders: [] })
 
     // The 3 pushed notes must each classify `unchanged`. None may surface as
     // remoteCreated (the duplicate/twin bug) or remoteUpdated/conflict.
@@ -594,7 +594,7 @@ maybe('e2e GitHub sync (live)', () => {
     //     the way applyNonConflicts would. gitLastPushedSha = CANONICAL sha,
     //     gitRemoteBaseSha = the RAW non-canonical remote sha. Critically the
     //     canonical sha differs from the remote sha (the churn trigger).
-    const pull = await pullFromGitHub({ token: TOKEN!, repo, notes: [], folders: [] })
+    const pull = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes: [], folders: [] })
     const created = pull.classifications.find(
       (c): c is Extract<typeof c, { kind: 'remoteCreated' }> =>
         c.kind === 'remoteCreated' && (c as { path: string }).path === nonCanonPath,
@@ -691,7 +691,7 @@ maybe('e2e GitHub sync (live)', () => {
     // (3) Re-pull with these notes (stale space-form gitPath, dash-form title).
     //     The fix must ADOPT each note to the dash-form remote file, NEVER
     //     classify it remoteDeleted (the soft-delete that precedes the wipe).
-    const pull = await pullFromGitHub({ token: TOKEN!, repo, notes: renNotes, folders: [] })
+    const pull = await pullFromGitHub({ provider: new GitHubProvider(TOKEN!), repo, notes: renNotes, folders: [] })
     const ourIds = new Set(renNotes.map(n => n.id))
     const ours = pull.classifications.filter(
       c => 'noteId' in c && ourIds.has((c as { noteId: string }).noteId),
@@ -956,7 +956,7 @@ rvhMaybe('e2e GitHub sync — REALISTIC VAULT (live)', () => {
     const settings = useSettingsStore.getState()
     const vaultSettingsPath = vaultSettingsRepoPath(settings.settingsFolderPath)
     const pull = await pullFromGitHub({
-      token: TOKEN!,
+      provider: new GitHubProvider(TOKEN!),
       repo: rvhRepo,
       notes: useNoteStore.getState().notes,
       folders: useFolderStore.getState().folders,

@@ -187,7 +187,7 @@ async function runPull(
   // Noteser's Vercel bandwidth. pullFromZipball + fetchZipball + the
   // /api/github/zipball route are kept in the tree but no longer on this path.
   const { classifications, latestCommitSha } = await pullFromGitHub({
-    token, repo,
+    provider: new GitHubProvider(token), repo,
     notes: localNotes, folders: localFolders,
     excludedFolderPaths,
     vaultSettingsPath,

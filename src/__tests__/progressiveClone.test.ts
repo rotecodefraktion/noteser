@@ -187,7 +187,7 @@ describe('classifier guard: a shell classifies unchanged WITHOUT fetching its bl
     })
 
     const { classifications } = await pullFromGitHub({
-      token: 'tok', repo: REPO, notes: [shell], folders: [],
+      provider: new GitHubProvider('tok'), repo: REPO, notes: [shell], folders: [],
     })
 
     const mine = classifications.filter(c => 'noteId' in c && (c as { noteId: string }).noteId === 's1')
@@ -212,7 +212,7 @@ describe('classifier guard: a shell classifies unchanged WITHOUT fetching its bl
       content: '', contentLoaded: false,
       gitLastPushedSha: SHELL_SHA, gitRemoteBaseSha: SHELL_SHA,
     })
-    const { classifications } = await pullFromGitHub({ token: 'tok', repo: REPO, notes: [shell], folders: [] })
+    const { classifications } = await pullFromGitHub({ provider: new GitHubProvider('tok'), repo: REPO, notes: [shell], folders: [] })
     const mine = classifications.filter(c => 'noteId' in c && (c as { noteId: string }).noteId === 's2')
     expect(mine).toHaveLength(1)
     expect(mine[0].kind).toBe('unchanged')
