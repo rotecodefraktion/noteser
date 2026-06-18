@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { GitHubUser, SyncRepo } from '@/types'
+import type { HostKind } from '@/utils/gitHost/types'
 import { STORAGE_KEYS } from '@/utils/storageKeys'
 import { trackEventOncePerSession } from '@/utils/analytics'
 
@@ -45,6 +46,13 @@ interface GitHubState {
   token: string | null
   user: GitHubUser | null
   connectedAt: number | null
+  // Which git host this connection targets. `'github'` is the default for
+  // every existing user (a persisted blob with no `host` key merges over this
+  // initial value). The sync pipeline selects the provider from it.
+  host: HostKind
+  // Base URL for the active host. Null means "use the provider's own default"
+  // (GitHub ignores it entirely; Forgejo falls back to codeberg.org).
+  baseUrl: string | null
   syncRepo: SyncRepo | null
   lastSyncedAt: number | null
   lastCommitSha: string | null
@@ -82,6 +90,7 @@ interface GitHubState {
   // the refresh token on every use, so the new one is persisted here too.
   applyRefreshedTokens: (tokens: GitHubTokenSet) => void
   setTokenScopes: (scopes: string[] | null) => void
+  setHost: (host: HostKind, baseUrl: string | null) => void
   setSyncRepo: (repo: SyncRepo | null) => void
   recordSync: (commitSha: string) => void
   setIsSyncing: (value: boolean) => void
@@ -99,6 +108,8 @@ export const useGitHubStore = create<GitHubState>()(
       token: null,
       user: null,
       connectedAt: null,
+      host: 'github',
+      baseUrl: null,
       syncRepo: null,
       lastSyncedAt: null,
       lastCommitSha: null,
@@ -128,6 +139,7 @@ export const useGitHubStore = create<GitHubState>()(
         refreshTokenExpiresAt: tokens.refreshTokenExpiresAt,
       }),
       setTokenScopes: (scopes) => set({ tokenScopes: scopes }),
+      setHost: (host, baseUrl) => set({ host, baseUrl }),
       setIsSyncing: (value) => set({ isSyncing: value }),
       setSyncRepo: (repo) => set(state => {
         const currentKey = repoKey(state.syncRepo)
@@ -161,6 +173,7 @@ export const useGitHubStore = create<GitHubState>()(
       }),
       disconnect: () => set({
         token: null, user: null, connectedAt: null,
+        host: 'github', baseUrl: null,
         syncRepo: null, lastSyncedAt: null, lastCommitSha: null,
         repoSyncStates: {}, tokenScopes: null,
         accessTokenExpiresAt: null, refreshToken: null, refreshTokenExpiresAt: null,
@@ -172,6 +185,8 @@ export const useGitHubStore = create<GitHubState>()(
         token: state.token,
         user: state.user,
         connectedAt: state.connectedAt,
+        host: state.host,
+        baseUrl: state.baseUrl,
         syncRepo: state.syncRepo,
         lastSyncedAt: state.lastSyncedAt,
         lastCommitSha: state.lastCommitSha,

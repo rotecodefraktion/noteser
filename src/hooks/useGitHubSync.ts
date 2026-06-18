@@ -10,7 +10,7 @@ import { VaultLockedError } from '@/utils/vaultKey'
 // prefetch). pullFromZipball still lives in githubSync.ts for callers/tests.
 import { syncToGitHub, pullFromGitHub } from '@/utils/githubSync'
 import type { PullClassification, SyncResult, GitPathUpdate } from '@/utils/githubSync'
-import { GitHubProvider } from '@/utils/gitHost/githubProvider'
+import { makeGitHostProvider } from '@/utils/gitHost'
 import { getValidGitHubToken, withTokenRefresh, ReconnectRequiredError } from '@/utils/tokenRefresh'
 import { applyNonConflicts, applyAttachmentClassifications } from '@/utils/syncApply'
 import { fillShellsInBackground } from '@/utils/backgroundFill'
@@ -186,8 +186,9 @@ async function runPull(
   // clone runs on the user's own authenticated GitHub API quota instead of
   // Noteser's Vercel bandwidth. pullFromZipball + fetchZipball + the
   // /api/github/zipball route are kept in the tree but no longer on this path.
+  const { host, baseUrl } = useGitHubStore.getState()
   const { classifications, latestCommitSha } = await pullFromGitHub({
-    provider: new GitHubProvider(token), repo,
+    provider: makeGitHostProvider({ host, token, baseUrl }), repo,
     notes: localNotes, folders: localFolders,
     excludedFolderPaths,
     vaultSettingsPath,
@@ -242,8 +243,9 @@ async function runPush(
     }
   }
 
+  const { host, baseUrl } = useGitHubStore.getState()
   const outcome = await syncToGitHub({
-    token, provider: new GitHubProvider(token), repo, notes, folders, commitMessage,
+    token, provider: makeGitHostProvider({ host, token, baseUrl }), repo, notes, folders, commitMessage,
     vaultSettings: vaultSettingsInput,
     // gi9n: thread the editor's draft through. Null = no pending edit;
     // syncToGitHub will leave the remote `.gitignore` alone.
