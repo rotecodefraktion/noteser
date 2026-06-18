@@ -139,6 +139,7 @@ if (typeof g.TextDecoder === 'undefined') {
 }
 
 import { pullFromGitHub, syncToGitHub, serializeNote, parseNote } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import {
   getBranchRefSha,
   getCommitTreeSha,
@@ -342,7 +343,7 @@ maybe('e2e GitHub sync (live)', () => {
 
   test('scenario 2: push 3 new notes → created === 3 + commitSha returned', async () => {
     const before = await getRefSha(HARNESS_BRANCH)
-    const outcome = await syncToGitHub({ token: TOKEN!, repo, notes, folders: [] })
+    const outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes, folders: [] })
 
     expect(outcome.result.unchanged).toBe(false)
     expect(outcome.result.created).toBe(3)
@@ -477,7 +478,7 @@ maybe('e2e GitHub sync (live)', () => {
     // (b) syncToGitHub with ONLY shells → NO push (no empty-body overwrite,
     //     no delete of the real remote file). Head sha unchanged.
     const headBefore = await getRefSha(HARNESS_BRANCH)
-    const dry = await syncToGitHub({ token: TOKEN!, repo, notes: shells, folders: [] })
+    const dry = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: shells, folders: [] })
     expect(dry.result.unchanged).toBe(true)
     expect(dry.result.created).toBe(0)
     expect(dry.result.updated).toBe(0)
@@ -541,7 +542,7 @@ maybe('e2e GitHub sync (live)', () => {
 
   test('scenario 4: empty-commit guard — re-push unchanged notes makes no new commit', async () => {
     const before = await getRefSha(HARNESS_BRANCH)
-    const outcome = await syncToGitHub({ token: TOKEN!, repo, notes, folders: [] })
+    const outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes, folders: [] })
 
     expect(outcome.result.unchanged).toBe(true)
     expect(outcome.result.created).toBe(0)
@@ -562,7 +563,7 @@ maybe('e2e GitHub sync (live)', () => {
       i === 0 ? { ...n, content: `${n.content}edited at ${Date.now()}\n`, updatedAt: Date.now() } : n,
     )
 
-    const outcome = await syncToGitHub({ token: TOKEN!, repo, notes, folders: [] })
+    const outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes, folders: [] })
     expect(outcome.result.unchanged).toBe(false)
     expect(outcome.result.updated).toBe(1)
     expect(outcome.result.created).toBe(0)
@@ -615,7 +616,7 @@ maybe('e2e GitHub sync (live)', () => {
     // (3) syncToGitHub with the note UNCHANGED → NO push, NO commit, NO blob.
     //     This is the churn fix: a non-canonical clone produces zero rewrites.
     const headBefore = await getRefSha(HARNESS_BRANCH)
-    const dry = await syncToGitHub({ token: TOKEN!, repo, notes: [cloned], folders: [] })
+    const dry = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: [cloned], folders: [] })
     expect(dry.result.unchanged).toBe(true)
     expect(dry.result.created).toBe(0)
     expect(dry.result.updated).toBe(0)
@@ -628,7 +629,7 @@ maybe('e2e GitHub sync (live)', () => {
 
     // (4) Now make a REAL edit → it MUST push (updated === 1, new commit).
     cloned = { ...cloned, content: `${body}\nedited at ${Date.now()}\n`, updatedAt: Date.now() }
-    const wet = await syncToGitHub({ token: TOKEN!, repo, notes: [cloned], folders: [] })
+    const wet = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: [cloned], folders: [] })
     expect(wet.result.unchanged).toBe(false)
     expect(wet.result.updated).toBe(1)
     expect(wet.result.created).toBe(0)
@@ -657,7 +658,7 @@ maybe('e2e GitHub sync (live)', () => {
     let renNotes: Note[] = [1, 2, 3].map(i =>
       makeNote(`rename ${rStamp} note ${i}`, `Rename scenario body ${i} for ${rStamp}\n`),
     )
-    const pushOut = await syncToGitHub({ token: TOKEN!, repo, notes: renNotes, folders: [] })
+    const pushOut = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: renNotes, folders: [] })
     expect(pushOut.result.created).toBe(3)
     renNotes = applyPathUpdates(renNotes, pushOut.pathUpdates)
     expect(renNotes.every(n => n.gitPath && n.gitLastPushedSha)).toBe(true)
@@ -732,7 +733,7 @@ maybe('e2e GitHub sync (live)', () => {
     //     files survive. Content + path both match the remote now, so this is a
     //     clean no-op push (head unchanged).
     const headBefore = await getRefSha(HARNESS_BRANCH)
-    const sync = await syncToGitHub({ token: TOKEN!, repo, notes: renNotes, folders: [] })
+    const sync = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: renNotes, folders: [] })
     expect(sync.result.deleted).toBe(0)
     const headAfter = await getRefSha(HARNESS_BRANCH)
     expect(headAfter).toBe(headBefore) // no commit at all → certainly no delete
@@ -756,7 +757,7 @@ maybe('e2e GitHub sync (live)', () => {
     const sStamp = Date.now()
     // Plant a note remotely and clone it so we know its exact remote path + sha.
     let live = makeNote(`safetynet ${sStamp}`, `Safety-net body ${sStamp}\n`)
-    const push = await syncToGitHub({ token: TOKEN!, repo, notes: [live], folders: [] })
+    const push = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: [live], folders: [] })
     live = applyPathUpdates([live], push.pathUpdates)[0]
     const livePath = live.gitPath!
     expect(livePath).toBeTruthy()
@@ -776,7 +777,7 @@ maybe('e2e GitHub sync (live)', () => {
     }
 
     const headBefore = await getRefSha(HARNESS_BRANCH)
-    const out = await syncToGitHub({ token: TOKEN!, repo, notes: [live, ghost], folders: [] })
+    const out = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo, notes: [live, ghost], folders: [] })
     expect(out.result.deleted).toBe(0)
     const headAfter = await getRefSha(HARNESS_BRANCH)
     expect(headAfter).toBe(headBefore)
@@ -1119,7 +1120,7 @@ rvhMaybe('e2e GitHub sync — REALISTIC VAULT (live)', () => {
     const headBefore = await getRefSha(RVH_BRANCH)
     let outcome: Awaited<ReturnType<typeof syncToGitHub>>
     try {
-      outcome = await syncToGitHub({ token: TOKEN!, repo: rvhRepo, notes, folders, vaultSettings })
+      outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo: rvhRepo, notes, folders, vaultSettings })
     } finally {
       globalThis.fetch = realFetch
     }
@@ -1222,7 +1223,7 @@ rvhMaybe('e2e GitHub sync — REALISTIC VAULT (live)', () => {
     const folders = useFolderStore.getState().folders
     const vaultSettings = await buildVaultSettingsBundle()
     const headBefore = await getRefSha(RVH_BRANCH)
-    const outcome = await syncToGitHub({ token: TOKEN!, repo: rvhRepo, notes, folders, vaultSettings })
+    const outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo: rvhRepo, notes, folders, vaultSettings })
     const headAfter = await getRefSha(RVH_BRANCH)
 
     const settingsWouldRePush = seeded !== canonicalHash
@@ -1367,7 +1368,7 @@ rvhMaybe('e2e GitHub sync — REALISTIC VAULT (live)', () => {
     const headBefore = await getRefSha(RVH_BRANCH)
     let outcome: Awaited<ReturnType<typeof syncToGitHub>>
     try {
-      outcome = await syncToGitHub({ token: TOKEN!, repo: rvhRepo, notes, folders, vaultSettings })
+      outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo: rvhRepo, notes, folders, vaultSettings })
     } finally {
       globalThis.fetch = realFetch
     }
@@ -1486,7 +1487,7 @@ rvhMaybe('e2e GitHub sync — REALISTIC VAULT (live)', () => {
     const headBefore = await getRefSha(RVH_BRANCH)
     let outcome: Awaited<ReturnType<typeof syncToGitHub>>
     try {
-      outcome = await syncToGitHub({ token: TOKEN!, repo: rvhRepo, notes, folders, vaultSettings })
+      outcome = await syncToGitHub({ token: TOKEN!, provider: new GitHubProvider(TOKEN!), repo: rvhRepo, notes, folders, vaultSettings })
     } finally {
       globalThis.fetch = realFetch
     }

@@ -9,6 +9,7 @@
  */
 
 import { syncToGitHub } from '../utils/githubSync'
+import { GitHubProvider } from '../utils/gitHost/githubProvider'
 import { generateSalt, saltToString, isEncryptedContent, decryptNoteContent, deriveKey } from '../utils/vaultCrypto'
 import { unlockVault, lockVault, _resetVaultKeyForTests, VaultLockedError } from '../utils/vaultKey'
 import type { Note, Folder, SyncRepo } from '@/types'
@@ -119,6 +120,7 @@ describe('vault encryption roundtrip', () => {
 
     await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [makeNote('1', 'A', 'Secret note body 🔐')],
       folders: [] as Folder[],
@@ -140,6 +142,7 @@ describe('vault encryption roundtrip', () => {
 
     await syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [makeNote('1', 'A', 'just plain text')],
       folders: [] as Folder[],
@@ -160,6 +163,7 @@ describe('vault encryption roundtrip', () => {
 
     await expect(syncToGitHub({
       token: 't',
+      provider: new GitHubProvider('t'),
       repo: REPO,
       notes: [makeNote('1', 'A', 'cannot push')],
       folders: [] as Folder[],
