@@ -147,6 +147,31 @@ describe('ForgejoProvider — git-data read', () => {
     )
   })
 
+  // Forgejo has no ETag layer, so the cached variants are plain aliases —
+  // same endpoint, same result as getTreeMap / getBlobContent.
+  test('getTreeMapCached aliases the plain getTreeMap (no ETag layer)', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        tree: [{ path: 'a.md', type: 'blob', sha: 'sha-a' }],
+        truncated: false,
+        total_count: 1,
+      }),
+    )
+    const p = new ForgejoProvider(TOKEN)
+    const map = await p.getTreeMapCached(REPO, 'tree-sha')
+    expect(call().url).toBe(
+      `${CODEBERG}/api/v1/repos/octo/vault/git/trees/tree-sha?recursive=true&page=1`,
+    )
+    expect(map).toEqual(new Map([['a.md', 'sha-a']]))
+  })
+
+  test('getBlobContentCached aliases the plain getBlobContent (no ETag layer)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ content: btoa('# hi'), encoding: 'base64' }))
+    const p = new ForgejoProvider(TOKEN)
+    await expect(p.getBlobContentCached(REPO, 'blob-sha')).resolves.toBe('# hi')
+    expect(call().url).toBe(`${CODEBERG}/api/v1/repos/octo/vault/git/blobs/blob-sha`)
+  })
+
   test('getTreeMap pages through a truncated tree', async () => {
     fetchMock
       .mockResolvedValueOnce(

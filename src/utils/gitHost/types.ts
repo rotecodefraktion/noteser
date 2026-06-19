@@ -94,6 +94,14 @@ export interface GitHostProvider {
   getBlobContent(repo: SyncRepo, sha: string): Promise<string>
   getBlobBytes(repo: SyncRepo, sha: string): Promise<Uint8Array>
 
+  // Cached read variants for the PULL path: same result as getTreeMap /
+  // getBlobContent, but a host may layer caching on top (GitHub uses #69
+  // ETag-conditional requests). The PUSH path must use the plain reads above
+  // — a stale tree would risk a non-fast-forward commit — so only pull uses
+  // these. Hosts without a caching layer (Forgejo) alias them to plain reads.
+  getTreeMapCached(repo: SyncRepo, treeSha: string): Promise<Map<string, string>>
+  getBlobContentCached(repo: SyncRepo, sha: string): Promise<string>
+
   // --- bulk archive (first-clone fast path) ---
   // Optional whole-repo archive download for the first-clone fast path
   // (GitHub: zipball; Forgejo: GET /archive/{ref}.zip, or omit). Returns the

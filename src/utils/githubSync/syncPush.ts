@@ -8,13 +8,7 @@
 // from `@/utils/githubSync`.
 
 import type { Note, SyncRepo } from '@/types'
-import {
-  getBranchRefSha,
-  getCommitTreeSha,
-  getTreeMap,
-  getBlobContent,
-  gitBlobSha,
-} from '../github'
+import { gitBlobSha } from '../github'
 import type { GitHostProvider, FileChange, CommitProgress } from '../gitHost/types'
 import { _resetUploadedShaCache } from '../gitHost/githubProvider'
 import {
@@ -114,8 +108,8 @@ export interface SyncOutcome {
 }
 
 export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
-  const { token, provider, repo, notes, folders, commitMessage, vaultSettings, vaultGitignoreDraft, onProgress } = input
-  const { owner, name, branch } = repo
+  const { provider, repo, notes, folders, commitMessage, vaultSettings, vaultGitignoreDraft, onProgress } = input
+  const { branch } = repo
   onProgress?.({ phase: 'computing' })
 
   // 1. Compute desired files for every active note.
@@ -152,9 +146,9 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   }
 
   // 2. Fetch the current branch state.
-  const parentCommitSha = await getBranchRefSha(token, owner, name, branch)
-  const baseTreeSha = await getCommitTreeSha(token, owner, name, parentCommitSha)
-  const remoteTree = await getTreeMap(token, owner, name, baseTreeSha)
+  const parentCommitSha = await provider.getBranchHeadSha(repo)
+  const baseTreeSha = await provider.getCommitTreeSha(repo, parentCommitSha)
+  const remoteTree = await provider.getTreeMap(repo, baseTreeSha)
 
   // Layered gitignore matcher for push (gi9n): defaults + remote +
   // local overlay. Same composition as the pull side so push and pull
@@ -165,7 +159,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   let pushRemoteRaw = ''
   if (remoteGitignoreSha) {
     try {
-      pushRemoteRaw = await getBlobContent(token, owner, name, remoteGitignoreSha)
+      pushRemoteRaw = await provider.getBlobContent(repo, remoteGitignoreSha)
     } catch {
       pushRemoteRaw = ''
     }
@@ -265,7 +259,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     if (locallyChanged && baseline !== null && remoteSha !== undefined && baseline === remoteSha) {
       try {
         const remoteRawBody = await maybeDecryptFromPull(
-          await getBlobContent(token, owner, name, remoteSha),
+          await provider.getBlobContent(repo, remoteSha),
         )
         if (isUnchangedModuloNormalization(content, remoteRawBody)) {
           locallyChanged = false
@@ -298,6 +292,10 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
       op: plan.remoteSha ? 'update' : 'create',
       path: plan.path,
       content: plan.content,
+      // Forgejo's ChangeFiles requires the current blob sha when updating an
+      // existing file; GitHub ignores it. Undefined for a create (no remote
+      // file yet), matching the delete path which also carries remoteSha.
+      sha: plan.remoteSha,
     })
     if (plan.remoteSha) updated++; else created++
     // Candidate pathUpdate — committed after the push only if the provider
@@ -364,7 +362,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     const blob = await getAttachmentBlob(path)
     if (!blob) continue
     const contentBytes = new Uint8Array(await blob.arrayBuffer())
-    changes.push({ op: remoteSha ? 'update' : 'create', path, contentBytes })
+    changes.push({ op: remoteSha ? 'update' : 'create', path, contentBytes, sha: remoteSha })
     if (remoteSha) updated++; else created++
   }
 
@@ -390,7 +388,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // the no-change case keeps idle syncs commit-free.
   let vaultGitignorePushed = false
   if (vaultGitignoreDraft != null && vaultGitignoreDraft !== pushRemoteRaw) {
-    changes.push({ op: remoteGitignoreSha ? 'update' : 'create', path: GITIGNORE_PATH, content: vaultGitignoreDraft })
+    changes.push({ op: remoteGitignoreSha ? 'update' : 'create', path: GITIGNORE_PATH, content: vaultGitignoreDraft, sha: remoteGitignoreSha })
     if (remoteGitignoreSha) updated++; else created++
     vaultGitignorePushed = true
   }
@@ -406,7 +404,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     const remoteHasFile = remoteTree.has(path)
     const localChanged = contentHash !== lastPushedHash
     if (localChanged || !remoteHasFile) {
-      changes.push({ op: remoteHasFile ? 'update' : 'create', path, content })
+      changes.push({ op: remoteHasFile ? 'update' : 'create', path, content, sha: remoteTree.get(path) })
       if (remoteHasFile) updated++; else created++
       vaultSettingsHashPushed = contentHash
     } else {

@@ -39,10 +39,20 @@ jest.mock('../utils/github', () => ({
   gitBlobShaBytes: jest.fn(async (bytes: Uint8Array) => `sha-bytes:${bytes.length}`),
 }))
 
+// The *Cached read variants delegate to the #69 ETag-conditional wrappers
+// (used by the PULL path); the plain getTreeMap/getBlobContent above are for
+// PUSH. Mock both so we can assert the split.
+jest.mock('../utils/githubETagCache', () => ({
+  getTreeMapConditional: jest.fn(),
+  getBlobContentConditional: jest.fn(),
+}))
+
 import * as github from '../utils/github'
+import * as etagCache from '../utils/githubETagCache'
 import { GitHubProvider, _resetUploadedShaCache } from '../utils/gitHost/githubProvider'
 
 const mock = github as jest.Mocked<typeof github>
+const etagMock = etagCache as jest.Mocked<typeof etagCache>
 
 const TOKEN = 'tok-123'
 const REPO: SyncRepo = { owner: 'octocat', name: 'vault', branch: 'main', isPrivate: true }
@@ -109,6 +119,25 @@ describe('GitHubProvider — git-data read delegation', () => {
     const p = new GitHubProvider(TOKEN)
     await expect(p.getBlobContent(REPO, 'blob-sha')).resolves.toBe('# hi')
     expect(mock.getBlobContent).toHaveBeenCalledWith(TOKEN, 'octocat', 'vault', 'blob-sha')
+  })
+
+  // The cached variants (PULL path) must hit the ETag-conditional wrappers,
+  // NOT the plain reads — that's the split that keeps PUSH byte-identical.
+  test('getTreeMapCached → getTreeMapConditional(token, repo, treeSha)', async () => {
+    const treeMap = new Map([['a.md', 'sha-a']])
+    etagMock.getTreeMapConditional.mockResolvedValue(treeMap)
+    const p = new GitHubProvider(TOKEN)
+    await expect(p.getTreeMapCached(REPO, 'tree-sha')).resolves.toBe(treeMap)
+    expect(etagMock.getTreeMapConditional).toHaveBeenCalledWith(TOKEN, REPO, 'tree-sha')
+    expect(mock.getTreeMap).not.toHaveBeenCalled()
+  })
+
+  test('getBlobContentCached → getBlobContentConditional(token, repo, sha)', async () => {
+    etagMock.getBlobContentConditional.mockResolvedValue('# hi')
+    const p = new GitHubProvider(TOKEN)
+    await expect(p.getBlobContentCached(REPO, 'blob-sha')).resolves.toBe('# hi')
+    expect(etagMock.getBlobContentConditional).toHaveBeenCalledWith(TOKEN, REPO, 'blob-sha')
+    expect(mock.getBlobContent).not.toHaveBeenCalled()
   })
 
   test('getBlobBytes → getBlobBytes(token, owner, repo, sha)', async () => {

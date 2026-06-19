@@ -27,6 +27,8 @@ import type { SyncRepo, GitHubRepo } from '@/types'
 import {
   getBranchRefSha,
   getCommitTreeSha,
+  getTreeMap,
+  getBlobContent,
   getBlobBytes,
   fetchZipball,
   listUserRepos,
@@ -42,12 +44,13 @@ import {
   gitBlobShaBytes,
   type GitTreeEntry,
 } from '../github'
-// Pull-side tree/blob reads go through the ETag-conditional wrappers so a
-// re-sync of an unchanged repo comes back as 304s and doesn't burn quota
-// (#69). Encapsulating them here keeps the optimization host-agnostic — the
-// pull pipeline only ever calls provider.getTreeMap / provider.getBlobContent
-// and never branches on host. There is no conditional binary variant, so
-// getBlobBytes stays on the bare helper.
+// The plain `getTreeMap`/`getBlobContent` above are the canonical reads used
+// by the PUSH path — byte-identical to pre-seam behavior, no caching layer in
+// the way (a stale tree during a push would risk a non-fast-forward commit).
+// The `*Cached` methods below add the #69 ETag-conditional caching and are
+// used only by the PULL path, where a re-sync of an unchanged repo should come
+// back as cheap 304s. Forgejo has no ETag variant, so its provider aliases the
+// cached methods to the plain reads. getBlobBytes has no conditional variant.
 import {
   getBlobContentConditional,
   getTreeMapConditional,
@@ -142,10 +145,18 @@ export class GitHubProvider implements GitHostProvider {
   }
 
   getTreeMap(repo: SyncRepo, treeSha: string): Promise<Map<string, string>> {
-    return getTreeMapConditional(this.token, repo, treeSha)
+    return getTreeMap(this.token, repo.owner, repo.name, treeSha)
   }
 
   getBlobContent(repo: SyncRepo, sha: string): Promise<string> {
+    return getBlobContent(this.token, repo.owner, repo.name, sha)
+  }
+
+  getTreeMapCached(repo: SyncRepo, treeSha: string): Promise<Map<string, string>> {
+    return getTreeMapConditional(this.token, repo, treeSha)
+  }
+
+  getBlobContentCached(repo: SyncRepo, sha: string): Promise<string> {
     return getBlobContentConditional(this.token, repo, sha)
   }
 
