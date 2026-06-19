@@ -196,6 +196,17 @@ export class ForgejoProvider implements GitHostProvider {
     return new TextDecoder('utf-8').decode(base64ToBytes(data.content))
   }
 
+  // Forgejo/Gitea has no ETag-conditional read layer here, so the cached
+  // variants are plain reads — same result, no caching. (The seam's PULL path
+  // calls these; PUSH uses getTreeMap/getBlobContent.)
+  getTreeMapCached(repo: SyncRepo, treeSha: string): Promise<Map<string, string>> {
+    return this.getTreeMap(repo, treeSha)
+  }
+
+  getBlobContentCached(repo: SyncRepo, sha: string): Promise<string> {
+    return this.getBlobContent(repo, sha)
+  }
+
   async getBlobBytes(repo: SyncRepo, sha: string): Promise<Uint8Array> {
     const data = (await this.get(
       `/repos/${repo.owner}/${repo.name}/git/blobs/${sha}`,

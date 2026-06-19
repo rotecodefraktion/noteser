@@ -73,7 +73,7 @@ export async function pullFromGitHub(input: {
   const isFirstClone = input.isFirstClone ?? false
   const headSha = await provider.getBranchHeadSha(repo)
   const treeSha = await provider.getCommitTreeSha(repo, headSha)
-  const remoteTree = await provider.getTreeMap(repo, treeSha)
+  const remoteTree = await provider.getTreeMapCached(repo, treeSha)
 
   // Build the gitignore matcher BEFORE walking the tree so step 1's
   // .md loop can short-circuit on ignored paths. The matcher is also
@@ -93,7 +93,7 @@ export async function pullFromGitHub(input: {
   let remoteRaw = ''
   if (gitignoreSha) {
     try {
-      remoteRaw = await provider.getBlobContent(repo, gitignoreSha)
+      remoteRaw = await provider.getBlobContentCached(repo, gitignoreSha)
     } catch {
       remoteRaw = ''
     }
@@ -190,7 +190,7 @@ export async function pullFromGitHub(input: {
         // didn't cover). The conditional read may itself be served from the
         // ETag cache and short-circuit before hitting the network. decrypt
         // runs here either way.
-        const raw = prefetchedBlobs.get(remoteSha) ?? await provider.getBlobContent(repo, remoteSha)
+        const raw = prefetchedBlobs.get(remoteSha) ?? await provider.getBlobContentCached(repo, remoteSha)
         remoteContent = await maybeDecryptFromPull(raw)
       }
       return remoteContent
@@ -353,7 +353,7 @@ export async function pullFromGitHub(input: {
       let autoMerged: string | null = null
       if (remoteBase) {
         try {
-          const ancestorRaw = await provider.getBlobContent(repo, remoteBase)
+          const ancestorRaw = await provider.getBlobContentCached(repo, remoteBase)
           const ancestor = await maybeDecryptFromPull(ancestorRaw)
           const merged = threeWayMerge(ancestor, localContent, content)
           if (merged.ok) autoMerged = merged.merged
@@ -455,7 +455,7 @@ export async function pullFromGitHub(input: {
     const remoteSettingsSha = remoteTree.get(vaultSettingsPath)
     if (remoteSettingsSha) {
       try {
-        const raw = await provider.getBlobContent(repo, remoteSettingsSha)
+        const raw = await provider.getBlobContentCached(repo, remoteSettingsSha)
         const { parseVaultSettings, vaultSettingsHash, pickVaultSlice, serializeVaultSettings } = await import('../vaultSettings')
         const parsed = parseVaultSettings(raw)
         if (parsed && parsed.updatedAt > vaultSettingsLocalUpdatedAt) {
