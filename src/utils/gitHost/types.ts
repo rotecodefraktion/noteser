@@ -7,7 +7,7 @@
 // git-data write primitives — it exposes a higher-level "commit a batch of
 // file changes" operation each host implements its own way.
 
-import type { SyncRepo } from '@/types'
+import type { SyncRepo, GitHubUser } from '@/types'
 
 export type HostKind = 'github' | 'forgejo'
 
@@ -109,6 +109,22 @@ export interface GitHostProvider {
   // leave this undefined and the caller falls back to the per-blob pull.
   fetchArchive?(repo: SyncRepo, ref: string): Promise<ArrayBuffer>
 
+  // The authenticated user behind the token. Used by the connect flow to
+  // populate the session identity host-agnostically.
+  getAuthenticatedUser(): Promise<HostUser>
+
   // --- git-data WRITE (the one real divergence) ---
   commitChanges(repo: SyncRepo, req: CommitRequest): Promise<CommitResult>
+}
+
+// Bridge the host-agnostic HostUser onto the store's existing GitHubUser shape
+// (avatarUrl -> avatar_url, id coerced to number). Lets the store keep its
+// current type while the connect flow stays host-agnostic.
+export function hostUserToGitHubUser(u: HostUser): GitHubUser {
+  return {
+    id: typeof u.id === 'number' ? u.id : Number(u.id) || 0,
+    login: u.login,
+    name: u.name,
+    avatar_url: u.avatarUrl ?? '',
+  }
 }

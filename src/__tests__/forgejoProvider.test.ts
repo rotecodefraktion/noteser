@@ -393,3 +393,24 @@ describe('ForgejoProvider — error handling', () => {
     await expect(p.getRepo('octo', 'missing')).rejects.toThrow(/404/)
   })
 })
+
+describe('getAuthenticatedUser', () => {
+  it('maps the Gitea /user payload to HostUser', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ id: 42, login: 'octo', full_name: 'Octo Cat', avatar_url: 'https://c.org/a.png' }),
+    )
+    const provider = new ForgejoProvider(TOKEN, CODEBERG)
+    const user = await provider.getAuthenticatedUser()
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${CODEBERG}/api/v1/user`,
+      expect.objectContaining({ headers: expect.objectContaining({ Authorization: `token ${TOKEN}` }) }),
+    )
+    expect(user).toEqual({ id: 42, login: 'octo', name: 'Octo Cat', avatarUrl: 'https://c.org/a.png' })
+  })
+
+  it('throws ForgejoAPIError on a non-ok response', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ message: 'bad token' }, 401))
+    const provider = new ForgejoProvider(TOKEN, CODEBERG)
+    await expect(provider.getAuthenticatedUser()).rejects.toThrow(/401/)
+  })
+})
