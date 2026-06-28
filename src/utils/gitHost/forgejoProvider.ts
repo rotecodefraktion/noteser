@@ -15,6 +15,7 @@ import type {
   GitHostProvider,
   HostKind,
   HostRepo,
+  HostUser,
   CommitRequest,
   CommitResult,
 } from './types'
@@ -145,6 +146,21 @@ export class ForgejoProvider implements GitHostProvider {
     })
     if (!res.ok) throw await ForgejoAPIError.fromResponse(res, 'Create repo')
     return toHostRepo((await res.json()) as GiteaRepo)
+  }
+
+  async getAuthenticatedUser(): Promise<HostUser> {
+    const data = (await this.get('/user', 'Read user')) as {
+      id: number
+      login: string
+      full_name?: string
+      avatar_url?: string
+    }
+    return {
+      id: data.id,
+      login: data.login,
+      name: data.full_name ? data.full_name : null,
+      avatarUrl: data.avatar_url,
+    }
   }
 
   // --- git-data READ ---

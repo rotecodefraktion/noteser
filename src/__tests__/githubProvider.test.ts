@@ -23,6 +23,7 @@ jest.mock('../utils/github', () => ({
   getTreeMap: jest.fn(),
   getBlobContent: jest.fn(),
   getBlobBytes: jest.fn(),
+  fetchGitHubUser: jest.fn(),
   listUserRepos: jest.fn(),
   listRepoBranches: jest.fn(),
   getRepo: jest.fn(),
@@ -48,6 +49,7 @@ jest.mock('../utils/githubETagCache', () => ({
 }))
 
 import * as github from '../utils/github'
+import { fetchGitHubUser } from '../utils/github'
 import * as etagCache from '../utils/githubETagCache'
 import { GitHubProvider, _resetUploadedShaCache } from '../utils/gitHost/githubProvider'
 
@@ -341,5 +343,17 @@ describe('GitHubProvider — commitChanges blob→tree→commit→ref', () => {
     expect(mock.createTree).toHaveBeenCalledWith(TOKEN, 'octocat', 'vault', 'base-tree', [
       { path: 'img.png', mode: '100644', type: 'blob', sha: 'binary-blob' },
     ])
+  })
+})
+
+describe('getAuthenticatedUser', () => {
+  it('delegates to fetchGitHubUser and maps to HostUser', async () => {
+    ;(fetchGitHubUser as jest.Mock).mockResolvedValueOnce({
+      id: 7, login: 'mona', name: 'Mona', avatar_url: 'https://gh/a.png',
+    })
+    const provider = new GitHubProvider('tok')
+    const user = await provider.getAuthenticatedUser()
+    expect(fetchGitHubUser).toHaveBeenCalledWith('tok')
+    expect(user).toEqual({ id: 7, login: 'mona', name: 'Mona', avatarUrl: 'https://gh/a.png' })
   })
 })
