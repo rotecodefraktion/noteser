@@ -108,4 +108,11 @@ describe('ContextMenu — "Publish as gist" visibility', () => {
     expect((modal.data as { noteId: string }).noteId).toBe(NOTE_ID)
     expect(onClose).toHaveBeenCalled()
   })
+
+  test('is NOT rendered when host is not GitHub', () => {
+    seedNote()
+    useGitHubStore.setState({ token: 'ghp_tok', user: null, host: 'forgejo' })
+    renderMenu()
+    expect(screen.queryByText('Publish as gist')).not.toBeInTheDocument()
+  })
 })

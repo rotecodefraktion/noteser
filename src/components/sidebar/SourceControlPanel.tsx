@@ -168,6 +168,7 @@ const RecentCommits = () => {
   const token = useGitHubStore(s => s.token)
   const repo = useGitHubStore(s => s.syncRepo)
   const lastCommitSha = useGitHubStore(s => s.lastCommitSha)
+  const isGitHubHost = useGitHubStore(s => s.host === 'github')
   const [open, setOpen] = useState(true)
   const [commits, setCommits] = useState<FileCommitEntry[] | null>(null)
   const [loading, setLoading] = useState(false)
@@ -204,7 +205,7 @@ const RecentCommits = () => {
     return () => { cancelled = true }
   }, [token, repo, lastCommitSha])
 
-  if (!token || !repo) return null
+  if (!token || !repo || !isGitHubHost) return null
 
   return (
     <div className="mt-3 pt-2 border-t border-obsidianBorder" data-testid="source-control-recent-commits">
