@@ -224,8 +224,17 @@ export const GitHubAuthModal = () => {
       setSession(token, hostUserToGitHubUser(hostUser))
       setStatus({ kind: 'success', login: hostUser.login })
       setTimeout(() => { syncRepo ? closeModal() : openModal({ type: 'github-repo' }) }, 1200)
-    } catch {
-      setForgejoError('That token did not work — check it has the right repo access.')
+    } catch (err) {
+      // A missing read:user scope is the most common first-token mistake: the
+      // token can touch repos but /user is denied, so surface that specifically
+      // rather than a generic failure. Forgejo's 403 body literally names the
+      // required scope.
+      const msg = err instanceof Error ? err.message : ''
+      setForgejoError(
+        /scope|read:user|403/i.test(msg)
+          ? 'That token is missing a scope — it needs read:user plus repository read/write.'
+          : 'That token did not work — check the URL and that it has read:user and repository read/write.',
+      )
     } finally {
       setForgejoSubmitting(false)
     }
@@ -368,8 +377,8 @@ export const GitHubAuthModal = () => {
         <form className="space-y-4" onSubmit={handleForgejoSubmit}>
           <p className="text-sm text-obsidianSecondaryText">
             {forgejoPreset === 'codeberg'
-              ? 'Paste a Codeberg personal access token scoped to your vault repo.'
-              : 'Provide your self-hosted Forgejo/Gitea URL and a personal access token.'}
+              ? 'Paste a Codeberg personal access token with read:user and repository read/write scopes.'
+              : 'Provide your self-hosted Forgejo/Gitea URL and a personal access token with read:user and repository read/write scopes.'}
           </p>
 
           {forgejoPreset === 'custom' && (
