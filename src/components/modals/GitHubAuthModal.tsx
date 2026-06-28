@@ -199,7 +199,8 @@ export const GitHubAuthModal = () => {
 
   // ── Forgejo / Codeberg PAT handler ───────────────────────────────────────────
 
-  const handleForgejoSubmit = async () => {
+  const handleForgejoSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
     const token = forgejoPat.trim()
     if (!token || forgejoSubmitting) return
 
@@ -366,7 +367,7 @@ export const GitHubAuthModal = () => {
 
       {/* ── Forgejo / Codeberg PAT form ─────────────────────────────────── */}
       {step === 'forgejo' && status.kind !== 'success' && (
-        <div className="space-y-4">
+        <form className="space-y-4" onSubmit={handleForgejoSubmit}>
           <p className="text-sm text-obsidianSecondaryText">
             {forgejoPreset === 'codeberg'
               ? 'Paste a Codeberg personal access token scoped to your vault repo.'
@@ -403,17 +404,16 @@ export const GitHubAuthModal = () => {
               Back
             </Button>
             <Button
-              type="button"
+              type="submit"
               variant="primary"
               isLoading={forgejoSubmitting}
               disabled={!forgejoPat.trim()}
-              onClick={handleForgejoSubmit}
               data-testid="forgejo-pat-submit"
             >
               Connect with token
             </Button>
           </div>
-        </div>
+        </form>
       )}
 
       {/* ── Shared success view (both GitHub and Forgejo paths end here) ─ */}

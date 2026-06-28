@@ -18,9 +18,9 @@ jest.mock('idb-keyval', () => ({
 }))
 
 // Provider factory is the seam we assert against.
-const getAuthenticatedUser = jest.fn()
+const mockGetAuthenticatedUser = jest.fn()
 jest.mock('../utils/gitHost', () => ({
-  makeGitHostProvider: jest.fn(() => ({ getAuthenticatedUser })),
+  makeGitHostProvider: jest.fn(() => ({ getAuthenticatedUser: mockGetAuthenticatedUser })),
   hostUserToGitHubUser: (u: { id: number; login: string; name: string | null; avatarUrl?: string }) => ({
     id: u.id, login: u.login, name: u.name, avatar_url: u.avatarUrl ?? '',
   }),
@@ -41,7 +41,7 @@ import { useUIStore } from '../stores/uiStore'
 import { useGitHubStore } from '../stores/githubStore'
 
 beforeEach(() => {
-  getAuthenticatedUser.mockReset()
+  mockGetAuthenticatedUser.mockReset()
   useGitHubStore.setState({ token: null, user: null, host: 'github', baseUrl: null, syncRepo: null })
   useUIStore.setState({ modal: { type: 'github-auth' } })
 })
@@ -52,7 +52,7 @@ it('shows the host picker first', () => {
 })
 
 it('connects a Codeberg vault via PAT and stores host+baseUrl', async () => {
-  getAuthenticatedUser.mockResolvedValueOnce({ id: 9, login: 'cberg', name: 'C', avatarUrl: '' })
+  mockGetAuthenticatedUser.mockResolvedValueOnce({ id: 9, login: 'cberg', name: 'C', avatarUrl: '' })
   render(<GitHubAuthModal />)
   fireEvent.click(screen.getByTestId('host-pick-codeberg'))
   fireEvent.change(screen.getByTestId('forgejo-pat-input'), { target: { value: 'pat-x' } })
@@ -68,5 +68,5 @@ it('requires a base URL for self-hosted Forgejo', async () => {
   fireEvent.change(screen.getByTestId('forgejo-pat-input'), { target: { value: 'pat-x' } })
   fireEvent.click(screen.getByTestId('forgejo-pat-submit'))
   await waitFor(() => expect(screen.getByText(/enter.*server url/i)).toBeInTheDocument())
-  expect(getAuthenticatedUser).not.toHaveBeenCalled()
+  expect(mockGetAuthenticatedUser).not.toHaveBeenCalled()
 })
