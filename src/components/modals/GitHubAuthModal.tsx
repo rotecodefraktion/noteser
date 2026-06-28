@@ -66,8 +66,6 @@ export const GitHubAuthModal = () => {
       abortRef.current?.abort()
       abortRef.current = null
     }
-  // closeModal/setSession are stable Zustand refs; safe to omit
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen])
 
   // Start (or restart) the GitHub OAuth device flow. Extracted so both the
