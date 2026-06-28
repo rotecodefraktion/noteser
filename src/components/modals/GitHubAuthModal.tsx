@@ -5,6 +5,7 @@ import { ArrowTopRightOnSquareIcon, CheckCircleIcon, ExclamationCircleIcon } fro
 import { Modal, Button, Input } from '@/components/ui'
 import { useUIStore, useGitHubStore } from '@/stores'
 import { startDeviceFlow, pollForToken, fetchGitHubUserAndScopes, DeviceFlowError, type DeviceFlowStart } from '@/utils/github'
+import { makeGitHostProvider, hostUserToGitHubUser } from '@/utils/gitHost'
 
 type Status =
   | { kind: 'requesting' }
@@ -19,31 +20,60 @@ export const GitHubAuthModal = () => {
   const closeModal = useUIStore(s => s.closeModal)
   const openModal = useUIStore(s => s.openModal)
   const setSession = useGitHubStore((s) => s.setSession)
+  const setHost = useGitHubStore((s) => s.setHost)
   const syncRepo = useGitHubStore((s) => s.syncRepo)
 
   const isOpen = modal.type === 'github-auth'
+
+  // Step state: 'pick' is the initial host picker; 'github' is the device-flow
+  // + GitHub-PAT path; 'forgejo' is the Forgejo/Codeberg PAT form.
+  const [step, setStep] = useState<'pick' | 'github' | 'forgejo'>('pick')
+
+  // GitHub device-flow / PAT state
   const [status, setStatus] = useState<Status>({ kind: 'requesting' })
   const [copied, setCopied] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
-
-  // Alternative sign-in path: a user can paste a fine-grained PAT scoped to
-  // just their vault repo (Contents: read+write) instead of running the broad
-  // `repo`-scoped device flow. Default stays the one-click device flow; this
-  // is revealed only when `usePat` is toggled on.
   const [usePat, setUsePat] = useState(false)
   const [patValue, setPatValue] = useState('')
   const [patError, setPatError] = useState<string | null>(null)
   const [patSubmitting, setPatSubmitting] = useState(false)
 
-  // Run the device flow whenever the modal opens; cancel on close.
+  // Forgejo / Codeberg state
+  const [forgejoPreset, setForgejoPreset] = useState<'codeberg' | 'custom'>('codeberg')
+  const [forgejoBaseUrl, setForgejoBaseUrl] = useState('')
+  const [forgejoPat, setForgejoPat] = useState('')
+  const [forgejoError, setForgejoError] = useState<string | null>(null)
+  const [forgejoSubmitting, setForgejoSubmitting] = useState(false)
+
+  // Reset to the host picker on modal open; do NOT auto-start the device flow.
   useEffect(() => {
     if (!isOpen) return
-    // Reset the PAT sub-form to its default (hidden) state each open so the
-    // device flow remains the default experience.
+    abortRef.current?.abort()
+    abortRef.current = null
+    setStep('pick')
     setUsePat(false)
     setPatValue('')
     setPatError(null)
     setPatSubmitting(false)
+    setForgejoPreset('codeberg')
+    setForgejoBaseUrl('')
+    setForgejoPat('')
+    setForgejoError(null)
+    setForgejoSubmitting(false)
+    setStatus({ kind: 'requesting' })
+    setCopied(false)
+    return () => {
+      abortRef.current?.abort()
+      abortRef.current = null
+    }
+  // closeModal/setSession are stable Zustand refs; safe to omit
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
+  // Start (or restart) the GitHub OAuth device flow. Extracted so both the
+  // "pick GitHub" handler and the retry button can call it.
+  const startGitHubDeviceFlow = () => {
+    abortRef.current?.abort()
     const controller = new AbortController()
     abortRef.current = controller
     setStatus({ kind: 'requesting' })
@@ -89,13 +119,7 @@ export const GitHubAuthModal = () => {
         }
       }
     })()
-    return () => {
-      controller.abort()
-      abortRef.current = null
-    }
-  // closeModal/setSession are stable Zustand refs; safe to omit
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen])
+  }
 
   const handleClose = () => {
     abortRef.current?.abort()
@@ -103,34 +127,28 @@ export const GitHubAuthModal = () => {
   }
 
   const handleRetry = () => {
-    abortRef.current?.abort()
-    // Toggle via setStatus to trigger the effect path; closeModal+reopen would also work.
-    setStatus({ kind: 'requesting' })
-    const controller = new AbortController()
-    abortRef.current = controller
-    ;(async () => {
-      try {
-        const device = await startDeviceFlow()
-        if (controller.signal.aborted) return
-        setStatus({ kind: 'waiting', device })
-        const tokenSet = await pollForToken({
-          deviceCode: device.device_code,
-          interval: device.interval,
-          expiresIn: device.expires_in,
-          signal: controller.signal,
-        })
-        if (controller.signal.aborted) return
-        const { user, scopes } = await fetchGitHubUserAndScopes(tokenSet.accessToken)
-        setSession(tokenSet.accessToken, user, scopes, tokenSet)
-        setStatus({ kind: 'success', login: user.login })
-        setTimeout(() => { if (!controller.signal.aborted) closeModal() }, 1200)
-      } catch (err) {
-        if (controller.signal.aborted) return
-        const message = err instanceof Error ? err.message : 'Unknown error'
-        setStatus({ kind: 'error', message })
-      }
-    })()
+    startGitHubDeviceFlow()
   }
+
+  // ── Host picker handlers ─────────────────────────────────────────────────────
+
+  const handlePickGitHub = () => {
+    setHost('github', null)
+    setStep('github')
+    startGitHubDeviceFlow()
+  }
+
+  const handlePickCodeberg = () => {
+    setForgejoPreset('codeberg')
+    setStep('forgejo')
+  }
+
+  const handlePickForgejo = () => {
+    setForgejoPreset('custom')
+    setStep('forgejo')
+  }
+
+  // ── GitHub PAT sub-form handlers ─────────────────────────────────────────────
 
   // Reveal the PAT sub-form. Abort the in-flight device-flow polling so the
   // two paths can't both resolve and race on setSession.
@@ -179,6 +197,41 @@ export const GitHubAuthModal = () => {
     }
   }
 
+  // ── Forgejo / Codeberg PAT handler ───────────────────────────────────────────
+
+  const handleForgejoSubmit = async () => {
+    const token = forgejoPat.trim()
+    if (!token || forgejoSubmitting) return
+
+    // Validate the base URL for self-hosted Forgejo (Codeberg fixes the URL).
+    if (forgejoPreset === 'custom') {
+      const u = forgejoBaseUrl.trim()
+      if (!u || !/^https?:\/\//.test(u)) {
+        setForgejoError('Enter your Forgejo/Gitea server URL (https://…).')
+        return
+      }
+    }
+
+    setForgejoSubmitting(true)
+    setForgejoError(null)
+
+    try {
+      const baseUrl = forgejoPreset === 'codeberg'
+        ? 'https://codeberg.org'
+        : forgejoBaseUrl.trim().replace(/\/+$/, '')
+      const provider = makeGitHostProvider({ host: 'forgejo', token, baseUrl })
+      const hostUser = await provider.getAuthenticatedUser()
+      setHost('forgejo', baseUrl)
+      setSession(token, hostUserToGitHubUser(hostUser))
+      setStatus({ kind: 'success', login: hostUser.login })
+      setTimeout(() => { syncRepo ? closeModal() : openModal({ type: 'github-repo' }) }, 1200)
+    } catch {
+      setForgejoError('That token did not work — check it has the right repo access.')
+    } finally {
+      setForgejoSubmitting(false)
+    }
+  }
+
   // Anchor's default click opens the new tab without tripping popup blockers.
   // We piggyback on the same click to copy synchronously (no await before the
   // browser sees the navigation intent).
@@ -199,10 +252,29 @@ export const GitHubAuthModal = () => {
 
   // When the PAT sub-form is open it replaces the device-flow views (but not
   // the terminal success/error views, which the PAT path drives too).
-  const showDeviceViews = !usePat
+  const showDeviceViews = step === 'github' && !usePat
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="Connect to GitHub" size="md">
+    <Modal isOpen={isOpen} onClose={handleClose} title="Connect a vault" size="md">
+      {/* ── Host picker ────────────────────────────────────────────────── */}
+      {step === 'pick' && (
+        <div className="space-y-4">
+          <p className="text-sm text-obsidianSecondaryText">Choose your git host to connect your vault.</p>
+          <div className="flex flex-col gap-3">
+            <Button variant="primary" data-testid="host-pick-github" onClick={handlePickGitHub}>
+              GitHub
+            </Button>
+            <Button variant="secondary" data-testid="host-pick-codeberg" onClick={handlePickCodeberg}>
+              Codeberg
+            </Button>
+            <Button variant="secondary" data-testid="host-pick-forgejo" onClick={handlePickForgejo}>
+              Forgejo / Gitea (self-hosted)
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── GitHub device-flow views (gated behind step === 'github') ─── */}
       {showDeviceViews && status.kind === 'requesting' && (
         <div className="space-y-4">
           <div className="flex flex-col items-center gap-3 py-6">
@@ -245,7 +317,8 @@ export const GitHubAuthModal = () => {
         </div>
       )}
 
-      {usePat && status.kind !== 'success' && (
+      {/* ── GitHub PAT sub-form ─────────────────────────────────────────── */}
+      {step === 'github' && usePat && status.kind !== 'success' && (
         <form className="space-y-4" onSubmit={handlePatSubmit}>
           <p className="text-sm text-obsidianSecondaryText">
             Create a fine-grained token in GitHub → Settings → Developer settings, scoped to your vault
@@ -291,6 +364,59 @@ export const GitHubAuthModal = () => {
         </form>
       )}
 
+      {/* ── Forgejo / Codeberg PAT form ─────────────────────────────────── */}
+      {step === 'forgejo' && status.kind !== 'success' && (
+        <div className="space-y-4">
+          <p className="text-sm text-obsidianSecondaryText">
+            {forgejoPreset === 'codeberg'
+              ? 'Paste a Codeberg personal access token scoped to your vault repo.'
+              : 'Provide your self-hosted Forgejo/Gitea URL and a personal access token.'}
+          </p>
+
+          {forgejoPreset === 'custom' && (
+            <Input
+              type="url"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="https://your-forgejo.example.com"
+              value={forgejoBaseUrl}
+              onChange={(e) => { setForgejoBaseUrl(e.target.value); setForgejoError(null) }}
+              data-testid="forgejo-baseurl-input"
+              autoFocus
+            />
+          )}
+
+          <Input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="Personal access token…"
+            value={forgejoPat}
+            onChange={(e) => { setForgejoPat(e.target.value); setForgejoError(null) }}
+            error={forgejoError ?? undefined}
+            data-testid="forgejo-pat-input"
+            autoFocus={forgejoPreset === 'codeberg'}
+          />
+
+          <div className="flex justify-between gap-2">
+            <Button type="button" variant="ghost" onClick={() => setStep('pick')}>
+              Back
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              isLoading={forgejoSubmitting}
+              disabled={!forgejoPat.trim()}
+              onClick={handleForgejoSubmit}
+              data-testid="forgejo-pat-submit"
+            >
+              Connect with token
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Shared success view (both GitHub and Forgejo paths end here) ─ */}
       {status.kind === 'success' && (
         <div className="flex flex-col items-center gap-3 py-6">
           <CheckCircleIcon className="w-10 h-10 text-green-500" />
@@ -298,6 +424,7 @@ export const GitHubAuthModal = () => {
         </div>
       )}
 
+      {/* ── GitHub device-flow error view ───────────────────────────────── */}
       {showDeviceViews && status.kind === 'error' && (
         <div className="space-y-4">
           <div className="flex items-start gap-2 p-3 bg-red-900/20 border border-red-900/40 rounded">
