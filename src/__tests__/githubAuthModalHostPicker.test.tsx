@@ -70,3 +70,16 @@ it('requires a base URL for self-hosted Forgejo', async () => {
   await waitFor(() => expect(screen.getByText(/enter.*server url/i)).toBeInTheDocument())
   expect(mockGetAuthenticatedUser).not.toHaveBeenCalled()
 })
+
+it('rejects a base URL without an http(s) scheme', async () => {
+  // The base-URL field is type="text" (not type="url") so our own regex
+  // validation always runs — a type="url" input would let the browser
+  // silently block submit and our inline error would never show.
+  render(<GitHubAuthModal />)
+  fireEvent.click(screen.getByTestId('host-pick-forgejo'))
+  fireEvent.change(screen.getByTestId('forgejo-baseurl-input'), { target: { value: 'notaurl' } })
+  fireEvent.change(screen.getByTestId('forgejo-pat-input'), { target: { value: 'pat-x' } })
+  fireEvent.click(screen.getByTestId('forgejo-pat-submit'))
+  await waitFor(() => expect(screen.getByText(/enter.*server url/i)).toBeInTheDocument())
+  expect(mockGetAuthenticatedUser).not.toHaveBeenCalled()
+})

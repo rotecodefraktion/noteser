@@ -374,7 +374,12 @@ export const GitHubAuthModal = () => {
 
           {forgejoPreset === 'custom' && (
             <Input
-              type="url"
+              // Deliberately type="text", not type="url": a type="url" input
+              // lets the browser's native HTML5 constraint validation pre-empt
+              // our onSubmit handler for malformed-but-non-empty values, so the
+              // regex check in handleForgejoSubmit never runs and the inline
+              // error never shows. text lets our own validation always fire.
+              type="text"
               autoComplete="off"
               spellCheck={false}
               placeholder="https://your-forgejo.example.com"
