@@ -107,6 +107,8 @@ NEXT_PUBLIC_FORGEJO_BASE_URL=https://your-forgejo.example.com
 
 `.env.local` is gitignored. For your hosting platform, add the same keys to the project's environment-variable settings.
 
+Using Codeberg (or a self-hosted Forgejo/Gitea) instead of GitHub as the vault host? See **[docs/codeberg.md](docs/codeberg.md)** — a Codeberg-only setup needs no GitHub OAuth app at all.
+
 ### Setting up the GitHub OAuth app
 
 1. https://github.com/settings/developers → **New OAuth App**
