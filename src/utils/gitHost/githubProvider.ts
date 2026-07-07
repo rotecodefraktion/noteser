@@ -31,6 +31,7 @@ import {
   getBlobContent,
   getBlobBytes,
   fetchZipball,
+  fetchGitHubUser,
   listUserRepos,
   listRepoBranches,
   getRepo as githubGetRepo,
@@ -59,6 +60,7 @@ import type {
   GitHostProvider,
   HostKind,
   HostRepo,
+  HostUser,
   CommitRequest,
   CommitResult,
 } from './types'
@@ -133,6 +135,11 @@ export class GitHubProvider implements GitHostProvider {
   async createRepo(name: string, isPrivate: boolean): Promise<HostRepo> {
     const repo = await githubCreateRepo(this.token, name, isPrivate)
     return toHostRepo(repo)
+  }
+
+  async getAuthenticatedUser(): Promise<HostUser> {
+    const u = await fetchGitHubUser(this.token)
+    return { id: u.id, login: u.login, name: u.name, avatarUrl: u.avatar_url }
   }
 
   // --- git-data READ ---

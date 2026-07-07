@@ -116,6 +116,7 @@ export const ContextMenu = ({ contextMenu, onClose }: ContextMenuProps) => {
   // return` below — react-hooks/rules-of-hooks won't accept a hook
   // call after an early return.
   const hasGithubToken = useGitHubStore(s => Boolean(s.token))
+  const isGitHubHost = useGitHubStore(s => s.host === 'github')
 
   const isNote = contextMenu.type === 'note'
   // The synthetic ".trash" sidebar folder uses a reserved id and is NOT a
@@ -593,14 +594,14 @@ export const ContextMenu = ({ contextMenu, onClose }: ContextMenuProps) => {
               onClick={handleCompareWithSelected}
             />
           )}
-          {canViewHistory && (
+          {canViewHistory && isGitHubHost && (
             <MenuButton
               icon={ClockIcon}
               label="View history"
               onClick={handleViewHistory}
             />
           )}
-          {hasGithubToken && !isTrashedNote && (
+          {hasGithubToken && !isTrashedNote && isGitHubHost && (
             <MenuButton
               icon={ShareIcon}
               label="Publish as gist"
