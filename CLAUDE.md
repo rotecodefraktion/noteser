@@ -1,5 +1,10 @@
 # CLAUDE.md
 
+> **Knowledge home (product / strategy): the Obsidian vault.** Roadmap, GTM/launch, backlog, sync-provider
+> plans, and design decisions live in `Personal/` + Claude Memory (`project-noteser`, `project-noteser-launch`,
+> `noteser-open-backlog`, `project-noteser-codeberg-sync`, `project-noteser-sync-test-harness`, …). This file
+> stays the **code** guide for the repo.
+
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Commands
@@ -7,7 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 npm run dev          # Start dev server on http://localhost:3001
 npm run build        # Production build
-npm run lint         # ESLint via Next.js
+npm run lint         # ESLint CLI (eslint .) — `next lint` is deprecated/removed in Next 16
+npm run lint:fix     # ESLint with --fix
 npm run typecheck    # TypeScript type checking (tsc --noEmit)
 npm run prettier     # Format all files
 npm test             # Run Jest tests
@@ -19,7 +25,7 @@ After changing `package.json` `overrides` (or any dependency shift that deduplic
 
 ## Architecture
 
-**Next.js 15 / React 19 app.** Single-page layout in `src/app/page.tsx`: a `<Sidebar>` on the left, the `<Editor>` (which renders 1–2 panes of tabs) on the right, modals at the root.
+**Next.js 15 / React 19 app.** Single-page layout in `src/app/page.tsx`: a `<Sidebar>` on the left, the `<Editor>` (which renders the split-pane layout tree of tabs) on the right, one app-wide status bar (`EditorFooter`) across the bottom, modals at the root.
 
 ### State management (Zustand)
 
@@ -32,17 +38,19 @@ All state lives in `src/stores/`. Most stores use `zustand/middleware/persist` t
 | `useTagStore` | `noteser-tags` | Legacy entity store — kept only because old data may reference it; new code derives tags from `#word` patterns in note bodies via `src/utils/tags.ts` |
 | `useUIStore` | `noteser-ui` | Sidebar collapse/width, preview mode, modal state, current view, `renameRequest` |
 | `useGitHubStore` | `noteser-github` | OAuth token, GitHub user, vault `syncRepo`, `lastCommitSha`, `lastSyncedAt` |
-| `useWorkspaceStore` | `noteser-workspace` (v2) | `panes[]` (max 2 horizontal), `activePaneId`, `mergeAppliedCount`. Only note-kind tabs are persisted — merge-conflict tabs are point-in-time |
+| `useWorkspaceStore` | `noteser-workspace` (v3) | `panes[]` (up to `MAX_PANES`), `layout` (recursive split tree), `activePaneId`, `mergeAppliedCount`. Only note-kind tabs are persisted — merge/welcome/compare tabs are point-in-time |
 
 **Hydration pattern.** Persisted stores cause SSR/client mismatches. Use `useHydration()` (returns `false` until `useEffect` fires) to defer rendering of persisted values.
 
 ### Workspace, tabs, panes
 
-- The editor area is one or two horizontal panes (`PaneState`), each with its own `tabs[]` and `activeTabId`.
-- Tabs are either `note` (with `noteId` + `isPreview` for VS Code-style preview tabs) or `merge-conflict` (with one `conflict` payload).
+- The editor area is a recursive split tree (`LayoutNode`: leaf → pane, split → horizontal/vertical pair with a ratio). Splits nest arbitrarily, Obsidian / VS Code style, up to the `MAX_PANES` safety cap; each pane (`PaneState`) has its own `tabs[]` and `activeTabId`.
+- Tabs are `note` (with `noteId` + `isPreview` for VS Code-style preview tabs), `merge-conflict` / `merge-batch`, `compare`, or `welcome`.
 - `openNote(noteId, { preview })`: single-click in sidebar opens as preview (italic); double-click pins; typing into the note auto-promotes preview → pinned via `promoteTab(tabId)`.
 - `moveTab(tabId, toPaneId, toIdx)` handles drag-and-drop reorder + cross-pane move.
-- `splitTabRight(tabId)` creates a second pane to the right with that tab.
+- `splitTabRight(tabId)` / `splitTabDown(tabId)` split the tab's pane; `dropTabOnPane(tabId, targetPaneId, region)` implements the VS Code drop semantics (center = move into pane, edge = split toward that edge; at the cap, edges degrade to center). The drop highlight is `.pane-drop-highlight` in `globals.css` — Tailwind v3 cannot alpha-modify the `var()`-based accent colors, so translucent accent fills must use `color-mix` there, NOT `bg-obsidianAccentPurple/20`-style classes (those compile to nothing).
+- A pane whose last tab leaves is compacted away and the layout collapses (no empty husk panes).
+- The status bar (`EditorFooter`) renders ONCE at the app level (bottom of the window, both layouts in `page.tsx`) and derives the active pane's active note itself — panes do not render footers.
 - `pruneStaleTabs()` runs once after hydration to drop tabs whose underlying note was deleted.
 
 ### Components

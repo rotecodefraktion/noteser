@@ -250,6 +250,33 @@ describe('markdownLivePreview StateField', () => {
     }
   })
 
+  // Depth + list-flavour coverage (bug #39 verification, 2026-06-10): the
+  // strike must not care how DEEP the nesting goes or what kind of list the
+  // parent is — TaskMarker drives the line decoration at any depth.
+  test('depth-2 nesting: all three done levels are struck', () => {
+    const doc = '- [x] a\n  - [x] b\n    - [x] c'
+    const decos = collectDecos(makeState(doc, 0))
+    for (let n = 1; n <= 3; n++) {
+      const ls = lineStart(doc, n)
+      expect(decos.find(d => d.from === ls && d.to === ls && d.class === 'cm-lp-task-done')).toBeDefined()
+    }
+  })
+
+  test('done task nested under an ORDERED done task is struck', () => {
+    const doc = '1. [x] ordered parent\n   - [x] nested child'
+    const decos = collectDecos(makeState(doc, 0))
+    const childStart = lineStart(doc, 2)
+    expect(decos.find(d => d.from === 0 && d.to === 0 && d.class === 'cm-lp-task-done')).toBeDefined()
+    expect(decos.find(d => d.from === childStart && d.to === childStart && d.class === 'cm-lp-task-done')).toBeDefined()
+  })
+
+  test('loose-list nested done task (blank line between parent and child) is struck', () => {
+    const doc = '- [x] parent\n\n  - [x] child'
+    const decos = collectDecos(makeState(doc, 0))
+    const childStart = lineStart(doc, 3)
+    expect(decos.find(d => d.from === childStart && d.to === childStart && d.class === 'cm-lp-task-done')).toBeDefined()
+  })
+
   test('done parent + UNDONE child with ✅ stamp: child is NOT struck', () => {
     const doc = '- [x] done parent ✅ 2026-05-25\n\t- [ ] still open child'
     const decos = collectDecos(makeState(doc, 0))
@@ -270,6 +297,79 @@ describe('markdownLivePreview StateField', () => {
     // At least one entry should be our DecorationSet (not a function)
     const hasDirectDecoSet = facetValues.some(v => typeof v !== 'function')
     expect(hasDirectDecoSet).toBe(true)
+  })
+})
+
+// ── Callouts (`> [!NOTE]` etc.) ──────────────────────────────────────────────
+//
+// GitHub-style alert blockquotes: the `[!TYPE]` marker line gets swapped for
+// an icon+label widget (off-cursor) and every line of the blockquote gets a
+// type-specific line class instead of the generic `cm-lp-blockquote`.
+
+describe('Callouts', () => {
+  function findReplace(state: EditorState) {
+    const decos = state.field(markdownLivePreviewField)
+    const out: Array<{ from: number; to: number; type: string }> = []
+    const cursor = decos.iter()
+    while (cursor.value !== null) {
+      const widget = (cursor.value.spec as { widget?: { type?: string } })?.widget
+      if (widget?.type) out.push({ from: cursor.from, to: cursor.to, type: widget.type })
+      cursor.next()
+    }
+    return out
+  }
+
+  test.each([
+    ['NOTE', 'note'], ['TIP', 'tip'], ['IMPORTANT', 'important'], ['WARNING', 'warning'], ['CAUTION', 'caution'],
+  ])('marker [!%s] gets a cm-lp-callout-%s line class on every quoted line', (marker, type) => {
+    const doc = `> [!${marker}]\n> Body text.\n`
+    const state = makeState(doc, doc.length) // cursor away from the blockquote
+    const decos = collectDecos(state)
+
+    const line1 = decos.find(d => d.from === 0 && d.to === 0)
+    const line2Start = doc.indexOf('> Body text.')
+    const line2 = decos.find(d => d.from === line2Start && d.to === line2Start)
+    expect(line1?.class).toBe(`cm-lp-callout-line cm-lp-callout-${type}`)
+    expect(line2?.class).toBe(`cm-lp-callout-line cm-lp-callout-${type}`)
+  })
+
+  test('marker is case-insensitive ([!warning] lowercase still detected)', () => {
+    const doc = '> [!warning]\n> Body.\n'
+    const state = makeState(doc, doc.length)
+    const decos = collectDecos(state)
+    const line1 = decos.find(d => d.from === 0 && d.to === 0)
+    expect(line1?.class).toBe('cm-lp-callout-line cm-lp-callout-warning')
+  })
+
+  test('replaces the [!TYPE] marker text with a label widget when cursor is elsewhere', () => {
+    const doc = '> [!NOTE]\n> Body.\n'
+    const state = makeState(doc, doc.length)
+    const widgets = findReplace(state)
+    // "[!NOTE]" spans [2, 9) — QuoteMark ("> ") occupies [0, 2).
+    expect(widgets).toContainEqual({ from: 2, to: 9, type: 'note' })
+  })
+
+  test('leaves the raw marker text editable (no widget) when the cursor is on that line', () => {
+    const doc = '> [!NOTE]\n> Body.\n'
+    const state = makeState(doc, 3) // cursor inside "[!NOTE]"
+    const widgets = findReplace(state)
+    expect(widgets).toEqual([])
+  })
+
+  test('a plain (non-callout) blockquote keeps the generic cm-lp-blockquote class', () => {
+    const doc = '> Just a regular quote.\n'
+    const state = makeState(doc, doc.length)
+    const decos = collectDecos(state)
+    const line1 = decos.find(d => d.from === 0 && d.to === 0)
+    expect(line1?.class).toBe('cm-lp-blockquote')
+  })
+
+  test('a line that merely contains "[!NOTE]" as part of a larger sentence is not a callout', () => {
+    const doc = '> See [!NOTE] for details.\n'
+    const state = makeState(doc, doc.length)
+    const decos = collectDecos(state)
+    const line1 = decos.find(d => d.from === 0 && d.to === 0)
+    expect(line1?.class).toBe('cm-lp-blockquote')
   })
 })
 

@@ -5,6 +5,7 @@ import { useGitHubStore, useNoteStore, useFolderStore, useSettingsStore, useWork
 import { useToastStore } from '@/stores/toastStore'
 import type { Toast } from '@/stores/toastStore'
 import { VaultLockedError } from '@/utils/vaultKey'
+import { isChunkLoadError, showChunkReloadToast, CHUNK_RELOAD_MESSAGE } from '@/utils/chunkLoadError'
 // no-vercel-clone: pullFromZipball is intentionally NOT imported here anymore —
 // the first-clone path now goes through pullFromGitHub (parallel blob
 // prefetch). pullFromZipball still lives in githubSync.ts for callers/tests.
@@ -476,7 +477,18 @@ export function useGitHubSync(): UseGitHubSyncResult {
           message: okMessage,
           url: result.commitUrl,
         })
-        addSyncToast({ kind: 'success', message: okMessage })
+        // attachment-timeout-retry: notes pushed fine, but the push skipped
+        // attachments this cycle (stalled IDB read) — say so instead of a
+        // plain success toast, since nothing was marked "pushed" and the
+        // next sync will pick them up automatically.
+        if (result.attachmentSyncSkipped) {
+          addSyncToast({
+            kind: 'info',
+            message: 'Synced, but attachments could not be read from this device — will retry on the next sync.',
+          })
+        } else {
+          addSyncToast({ kind: 'success', message: okMessage })
+        }
         setTimeout(() => setSyncState({ kind: 'idle' }), 5000)
       })
     } catch (err) {
@@ -507,6 +519,12 @@ export function useGitHubSync(): UseGitHubSyncResult {
           kind: 'error', message: err.message,
           actionLabel: 'Reconnect', onAction: () => { useUIStore.getState().openModal({ type: 'github-auth' }) },
         })
+      } else if (isChunkLoadError(err)) {
+        // A deploy landed while this tab was open and a lazy chunk the sync
+        // path needed is gone from the CDN. Retry can never succeed — offer
+        // a reload instead (vault state is persisted, nothing is lost).
+        setSyncState({ kind: 'err', message: CHUNK_RELOAD_MESSAGE })
+        showChunkReloadToast()
       } else {
         const message = err instanceof Error ? err.message : 'Sync failed'
         setSyncState({ kind: 'err', message })
@@ -636,6 +654,10 @@ export function useGitHubSync(): UseGitHubSyncResult {
           (err instanceof TypeError && /fetch/i.test(err.message))
         if (isOffline) {
           setSyncState({ kind: 'err', message: 'Offline — using cached vault' })
+        } else if (isChunkLoadError(err)) {
+          // Stale deploy — see the matching branch in runSync.
+          setSyncState({ kind: 'err', message: CHUNK_RELOAD_MESSAGE })
+          showChunkReloadToast()
         } else {
           const message = err instanceof Error ? err.message : 'Pull failed'
           setSyncState({ kind: 'err', message })

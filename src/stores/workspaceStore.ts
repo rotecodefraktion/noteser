@@ -5,6 +5,7 @@ import type { PullClassification } from '@/utils/githubSync'
 import { SYNC_REQUEST_EVENT } from '@/utils/events'
 import { useNoteStore } from './noteStore'
 import { STORAGE_KEYS } from '@/utils/storageKeys'
+import { localStorageJSON } from '@/utils/persistStorage'
 import {
   type NavHistory,
   createHistory,
@@ -51,15 +52,23 @@ export interface PaneState {
 
 // Layout tree describing how panes are arranged on screen. Leaves point
 // back to a PaneState by id; splits arrange their two children either
-// side-by-side (horizontal) or stacked top-over-bottom (vertical). A
-// 3-pane workspace is two nested splits — e.g. a 'right' split whose
-// right child is a 'down' split forms an L-shape. We carry a per-split
-// ratio so the divider drag can persist.
+// side-by-side (horizontal) or stacked top-over-bottom (vertical).
+// Splits nest arbitrarily, so any Obsidian / VS Code-style arrangement
+// (rows of columns, L-shapes, grids) is expressible. We carry a
+// per-split ratio so the divider drag can persist.
 export type LayoutNode =
   | { kind: 'leaf'; paneId: string }
   | { kind: 'split'; direction: 'horizontal' | 'vertical'; ratio: number; children: [LayoutNode, LayoutNode] }
 
-export const MAX_PANES = 3
+// Obsidian and VS Code don't cap split count; this is a safety valve so
+// a runaway persisted layout can't render dozens of unusable slivers.
+// Anything a human would actually arrange on one screen fits well below
+// it. At the cap, splits degrade to "move into an existing pane".
+export const MAX_PANES = 8
+
+// Where a dragged tab lands on a pane: the center moves it INTO the
+// pane; an edge splits the pane and puts the tab on that side.
+export type PaneDropRegion = 'center' | 'left' | 'right' | 'top' | 'bottom'
 
 interface WorkspaceState {
   panes: PaneState[]              // length 1..MAX_PANES
@@ -113,6 +122,11 @@ interface WorkspaceState {
   // Obsidian's "Split down". No-op once the workspace already holds
   // MAX_PANES panes.
   splitTabDown: (tabId: string) => void
+  // Drop a dragged tab onto TARGET pane: 'center' moves it into that
+  // pane; an edge region splits THAT pane (not the tab's source pane)
+  // with the tab landing on the dropped side. At MAX_PANES an edge drop
+  // degrades to a center move.
+  dropTabOnPane: (tabId: string, targetPaneId: string, region: PaneDropRegion) => void
   // Persist a divider drag for a particular split node (looked up by the
   // ids of the two panes immediately on either side of it; order doesn't
   // matter). Ratio is the size fraction of the FIRST child in tree order
@@ -255,12 +269,52 @@ function findSplitBetween(node: LayoutNode, a: string, b: string): { path: numbe
   return null
 }
 
+// Core split: take `tabId` out of its source pane and place it in a NEW
+// pane created by splitting `targetPaneId`'s leaf. `place` picks which
+// side of the target the new pane lands on ('before' = left/top). If the
+// source pane just emptied it is compacted away and the layout collapses
+// — no empty husk panes (#184; the pre-2026-06 behaviour of leaving the
+// source pane empty was reported as broken by the owner and removed).
+function splitPaneWithTab(
+  set: (partial: Partial<WorkspaceState>) => void,
+  get: () => WorkspaceState,
+  tabId: string,
+  targetPaneId: string,
+  direction: 'horizontal' | 'vertical',
+  place: 'before' | 'after',
+): void {
+  const state = get()
+  const loc = findTab(state.panes, tabId)
+  if (!loc) return
+  const sourcePane = state.panes[loc.paneIdx]
+  // Splitting a pane with its own ONLY tab is a no-op: the emptied
+  // source would collapse straight away and the net layout is what you
+  // started with (minus the pane's history). Bail before mutating.
+  if (sourcePane.id === targetPaneId && sourcePane.tabs.length === 1) return
+  if (!state.panes.some(p => p.id === targetPaneId)) return
+
+  const tab = sourcePane.tabs[loc.tabIdx]
+  const draft = state.panes.map(p => ({ ...p, tabs: [...p.tabs] }))
+  draft[loc.paneIdx].tabs.splice(loc.tabIdx, 1)
+  if (draft[loc.paneIdx].activeTabId === tabId) {
+    const remaining = draft[loc.paneIdx].tabs
+    draft[loc.paneIdx].activeTabId = remaining[loc.tabIdx]?.id ?? remaining[loc.tabIdx - 1]?.id ?? null
+  }
+
+  const newPane: PaneState = { id: uuidv4(), tabs: [tab], activeTabId: tab.id }
+  // splitLeaf takes the ORIGINAL pane's side: new pane 'after' ⇒ original first.
+  const split = splitLeaf(state.layout, targetPaneId, newPane.id, direction, place === 'after' ? 0 : 1)
+  const compacted = compactPanes([...draft, newPane])
+  const layout = reconcileLayout(split, compacted)
+  set({ panes: compacted, layout, activePaneId: newPane.id })
+  selectNoteFromActive(compacted, newPane.id)
+}
+
 // Shared core for Split right / Split down. Direction picks how the new
 // pane sits relative to the original (horizontal = right, vertical =
-// below). The 4th-split rejection lives here so both entry points stay
-// in sync. Once the workspace already holds MAX_PANES panes we fall
-// back to moving the tab into the most-recently-created pane, which is
-// the pre-3-pane behaviour for splitTabRight.
+// below). The at-cap rejection lives here so both entry points stay in
+// sync. Once the workspace already holds MAX_PANES panes we fall back
+// to moving the tab into the most-recently-created pane.
 function splitTabInternal(
   set: (partial: Partial<WorkspaceState>) => void,
   get: () => WorkspaceState,
@@ -274,10 +328,10 @@ function splitTabInternal(
   if (state.panes.length >= MAX_PANES) {
     // No room for a new pane — drop the tab into the last pane the user
     // created (panes are appended on split, so panes[last] is "the
-    // newest one"). Preserves the "splitting a third time = move into
-    // an existing split" affordance. We move INLINE rather than via
+    // newest one"). Preserves the "splitting at the cap = move into an
+    // existing split" affordance. We move INLINE rather than via
     // moveTab so a now-empty source pane isn't compacted away — the
-    // 3-pane layout must stay 3 panes (Obsidian leaves an empty leaf
+    // at-cap layout keeps its pane count (Obsidian leaves an empty leaf
     // sitting where the user is, mirroring splitTabRight's own "leave
     // the original pane in place but empty" rule below).
     const targetPane = state.panes[state.panes.length - 1]
@@ -302,23 +356,7 @@ function splitTabInternal(
     return
   }
 
-  const sourcePane = state.panes[loc.paneIdx]
-  const tab = sourcePane.tabs[loc.tabIdx]
-
-  const draft = state.panes.map(p => ({ ...p, tabs: [...p.tabs] }))
-  draft[loc.paneIdx].tabs.splice(loc.tabIdx, 1)
-  if (draft[loc.paneIdx].activeTabId === tabId) {
-    const remaining = draft[loc.paneIdx].tabs
-    draft[loc.paneIdx].activeTabId = remaining[loc.tabIdx]?.id ?? remaining[loc.tabIdx - 1]?.id ?? null
-  }
-
-  const newPane: PaneState = { id: uuidv4(), tabs: [tab], activeTabId: tab.id }
-  // Obsidian behaviour: splitting the ONLY tab leaves the original pane
-  // in place but empty. compactPanes intentionally is NOT called here.
-  const panes: PaneState[] = [...draft, newPane]
-  const layout = splitLeaf(state.layout, sourcePane.id, newPane.id, direction)
-  set({ panes, layout, activePaneId: newPane.id })
-  selectNoteFromActive(panes, newPane.id)
+  splitPaneWithTab(set, get, tabId, state.panes[loc.paneIdx].id, direction, 'after')
 }
 
 // Re-derive a layout for a flat list of panes when the persisted layout
@@ -901,6 +939,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         splitTabInternal(set, get, tabId, 'vertical')
       },
 
+      dropTabOnPane: (tabId, targetPaneId, region) => {
+        const state = get()
+        const loc = findTab(state.panes, tabId)
+        if (!loc) return
+        if (!state.panes.some(p => p.id === targetPaneId)) return
+        const sourcePaneId = state.panes[loc.paneIdx].id
+        // Center drop, or an edge drop when there's no room for another
+        // pane, means "move into the pane the user pointed at".
+        if (region === 'center' || state.panes.length >= MAX_PANES) {
+          if (sourcePaneId === targetPaneId) return // back where it came from
+          get().moveTab(tabId, targetPaneId, Number.MAX_SAFE_INTEGER)
+          return
+        }
+        const direction = region === 'left' || region === 'right' ? 'horizontal' : 'vertical'
+        const place = region === 'left' || region === 'top' ? 'before' : 'after'
+        splitPaneWithTab(set, get, tabId, targetPaneId, direction, place)
+      },
+
       setLayoutRatio: (paneA, paneB, ratio) => {
         const state = get()
         const found = findSplitBetween(state.layout, paneA, paneB)
@@ -1030,6 +1086,10 @@ export const useWorkspaceStore = create<WorkspaceState>()(
     },
     {
       name: STORAGE_KEYS.workspace,
+      // Explicit default-equivalent storage with a non-browser fallback —
+      // keeps SSR / node-env Jest suites free of "storage is currently
+      // unavailable" persist warnings (issue #131).
+      storage: localStorageJSON,
       version: 3, // bumped: layout tree added alongside flat panes[]
       migrate: migrateWorkspace,
       partialize: (state) => ({

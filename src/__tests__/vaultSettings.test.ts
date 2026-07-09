@@ -39,7 +39,10 @@ function fakeSettings(overrides: Partial<SettingsState> = {}): SettingsState {
     monthlyNotesFolder: 'Notes/Monthly',
     monthlyNoteDateFormat: 'YYYY-MM',
     templatesFolder: 'Templates',
+    dailyNoteTemplatePath: null,
+    weeklyNoteTemplatePath: null,
     dailyNoteTemplateId: null,
+    weeklyNoteTemplateId: null,
     aiProvider: 'off',
     aiApiKey: '',
     aiModel: '',
@@ -75,6 +78,7 @@ test('serialize → parse round-trips a vault slice cleanly', () => {
     folderSortMode: 'modified',
     taskListDensity: 'compact',
     trashMode: 'hardDelete',
+    trashFolderName: '.recycle',
     confirmBulkDelete: false,
   })
   const ts = 1716200000000
@@ -86,6 +90,10 @@ test('serialize → parse round-trips a vault slice cleanly', () => {
   expect(parsed!.vault.folderSortMode).toBe('modified')
   expect(parsed!.vault.taskListDensity).toBe('compact')
   expect(parsed!.vault.trashMode).toBe('hardDelete')
+  // #178 — both trash settings round-trip through the vault settings
+  // file (this is how they reach other devices; the trash folder itself
+  // never exists in the repo tree).
+  expect(parsed!.vault.trashFolderName).toBe('.recycle')
   expect(parsed!.vault.confirmBulkDelete).toBe(false)
 })
 

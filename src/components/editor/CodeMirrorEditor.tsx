@@ -5,9 +5,11 @@ import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { EditorView, keymap, drawSelection, type Command } from '@codemirror/view'
 import { Prec, Compartment } from '@codemirror/state'
-import { moveLineUp, moveLineDown, deleteLine } from '@codemirror/commands'
+import { moveLineUp, moveLineDown, deleteLine, history } from '@codemirror/commands'
+import { toggleFold, foldAll, unfoldAll } from '@codemirror/language'
 import { search, searchKeymap, openSearchPanel } from '@codemirror/search'
 import { diffGutterExtension, setDiffBaseline } from './diffGutter'
+import { foldableHeadings } from './foldableHeadings'
 import { getLastPushedContent } from '@/utils/lastPushedContent'
 import { useDebouncedCallback } from '@/hooks/useDebounce'
 import { useUIStore, useGitHubStore } from '@/stores'
@@ -17,6 +19,7 @@ import { tasksLivePreview } from './tasksLivePreview'
 import { basesLivePreview } from './basesLivePreview'
 import { imagesLivePreview } from './imagesLivePreview'
 import { linksLivePreview } from './linksLivePreview'
+import { hangingIndentExtension } from './hangingIndentPlugin'
 import { getActiveWikilinkQuery } from '@/utils/wikilinks'
 import { getActiveTagQuery } from '@/utils/tagAutocomplete'
 import { collectAllTags } from '@/utils/tags'
@@ -24,6 +27,7 @@ import { findNoteByTitleOrAlias } from '@/utils/aliases'
 import { toggleTaskLineText, UI_TASK_LINE_REGEX } from '@/utils/tasks'
 import {
   splitListLine,
+  tightListContinuation,
   cycleState,
   nextCycleState,
   setCycleState,
@@ -48,9 +52,11 @@ import {
 } from '@/utils/blockRef'
 import { useNoteStore } from '@/stores/noteStore'
 import { saveAttachment } from '@/utils/attachments'
+import { isBareUrl, anchorFromHtml, markdownLink, FETCHING_TITLE_PLACEHOLDER } from '@/utils/pasteLink'
 import { WikilinkAutocomplete } from './WikilinkAutocomplete'
 import { TagAutocomplete } from './TagAutocomplete'
-import { getConfiguredUrl } from '@/hooks/useCollaboration'
+import { getCollabUrlForNote } from '@/hooks/useCollaboration'
+import { useActiveCollabStore } from '@/stores/activeCollabStore'
 // Type-only import: erased at compile time, so it does NOT pull yjs /
 // y-websocket / y-codemirror.next into the editor bundle. The actual
 // createCollabBinding implementation is loaded via dynamic import() inside
@@ -83,11 +89,23 @@ interface CodeMirrorEditorProps {
 // references into the document at `pos`. Async on purpose — the drop/paste
 // event handler kicks this off and returns immediately so CodeMirror doesn't
 // block on the IDB write.
-async function insertImagesAt(view: EditorView, files: File[], pos: number): Promise<void> {
+//
+// `binding` is this note's live collab session, if any (null when collab is
+// off/not active for this note). Relaying is fired WITHOUT awaiting it — the
+// local save has already succeeded, so the paste UX (ref insertion below)
+// must not wait on base64-encoding + a Yjs transaction.
+async function insertImagesAt(
+  view: EditorView,
+  files: File[],
+  pos: number,
+  binding: CollabBinding | null,
+  noteTitle: string,
+): Promise<void> {
   const refs: string[] = []
   for (const file of files) {
     try {
-      const path = await saveAttachment(file, file.name || 'image.png')
+      const path = await saveAttachment(file, file.name || 'image.png', new Date(), noteTitle)
+      void binding?.shareAttachment(path, file, file.name || 'image.png')
       const alt = (file.name || 'image').replace(/\.[^.]+$/, '')
       refs.push(`![${alt}](${path})`)
     } catch (err) {
@@ -101,6 +119,42 @@ async function insertImagesAt(view: EditorView, files: File[], pos: number): Pro
   view.dispatch({
     changes: { from: pos, to: pos, insert },
     selection: { anchor: pos + insert.length },
+  })
+}
+
+// Insert `[Fetching title…](url)` at `pos`, then swap the placeholder for
+// the real page title once /api/link-title answers. The swap re-locates the
+// exact placeholder string instead of trusting saved offsets, so concurrent
+// typing elsewhere in the note can't corrupt the splice — if the user edited
+// the placeholder itself, the swap silently aborts. On a failed or empty
+// lookup the whole link collapses back to the bare URL (Obsidian Auto Link
+// Title behavior).
+async function insertLinkWithFetchedTitle(view: EditorView, url: string, pos: number): Promise<void> {
+  const placeholder = markdownLink(FETCHING_TITLE_PLACEHOLDER, url)
+  view.dispatch({
+    changes: { from: pos, to: pos, insert: placeholder },
+    selection: { anchor: pos + placeholder.length },
+  })
+
+  let title: string | null = null
+  try {
+    const res = await fetch(`/api/link-title?url=${encodeURIComponent(url)}`)
+    if (res.ok) {
+      const data = (await res.json()) as { title?: string | null }
+      title = typeof data.title === 'string' && data.title.trim() !== '' ? data.title : null
+    }
+  } catch {
+    // Network failure — fall through to the bare-URL fallback.
+  }
+
+  const doc = view.state.doc.toString()
+  const found = doc.indexOf(placeholder, Math.max(0, pos - placeholder.length))
+  const at = found !== -1 ? found : doc.indexOf(placeholder)
+  if (at === -1) return // user edited the placeholder away; leave their text alone
+
+  const replacement = title ? markdownLink(title, url) : url
+  view.dispatch({
+    changes: { from: at, to: at + placeholder.length, insert: replacement },
   })
 }
 
@@ -273,6 +327,77 @@ const exitEmptyCheckboxOnEnter: Command = (view) => {
   return true
 }
 
+// Shift+Enter inside a list/task line — insert a newline + a continuation
+// indent that matches the current item's MARKER WIDTH, so the next line is
+// parsed as a paragraph continuation of the same list item (CommonMark "list
+// paragraph" rule). The new line has NO list marker — Enter still starts a
+// fresh sibling item via the markdown extension's continuation handler.
+//
+// Marker widths produced (no extra leading indent):
+//   "- text"        -> 2  ("- ")
+//   "1. text"       -> 3  ("1. "); "12. text" -> 4
+//   "- [ ] text"    -> 6  ("- " + "[ ] ")
+//   "1. [ ] text"   -> 7
+//   "   - nested"   -> 3 + 2 = 5 (indent preserved)
+//
+// On a plain line: returns false so the default Shift+Enter (= newline) runs.
+// On a multi-selection: not handled (returns false) — the markdown extension's
+// fallbacks then take over.
+export const continueListItemParagraph: Command = (view) => {
+  const { state } = view
+  const range = state.selection.main
+  if (!range.empty) return false
+  const line = state.doc.lineAt(range.from)
+  const parts = splitListLine(line.text)
+  if (parts.kind === 'plain') return false
+
+  // Continuation prefix: preserve the literal indent (tabs stay tabs), then
+  // pad with SPACES to cover the marker (carrier + checkbox if any). Using
+  // literal indent keeps tab/space conventions consistent with the surrounding
+  // doc; space-padding the marker portion is what CommonMark requires for the
+  // paragraph to attach to the list item.
+  const markerWidth = parts.carrier.length + (parts.kind === 'task' ? 4 : 0)
+  const pad = parts.indent + ' '.repeat(markerWidth)
+
+  const insert = '\n' + pad
+  view.dispatch({
+    changes: { from: range.from, to: range.to, insert },
+    selection: { anchor: range.from + insert.length },
+    scrollIntoView: true,
+    userEvent: 'input',
+  })
+  return true
+}
+
+// Pressing Enter at the end of a NON-EMPTY list/task line continues the list
+// TIGHTLY: exactly one newline + the next marker. This pre-empts the markdown
+// keymap's `insertNewlineContinueMarkup`, which inserts an extra blank line
+// before each new item when the list is "loose" (its items are separated by
+// blank lines — the shape Jon's daily notes use), turning one Enter on
+// "- [ ] foo" into "\n\n- [ ] " instead of "\n- [ ] ". Returns false for a
+// plain line or an empty list item / mid-line caret so default Enter (split /
+// list-exit) still applies.
+const continueListTight: Command = (view) => {
+  const { state } = view
+  const sel = state.selection.main
+  if (!sel.empty) return false
+  const line = state.doc.lineAt(sel.head)
+  if (sel.head !== line.to) return false // only at the end of the line
+  const cont = tightListContinuation(line.text)
+  if (cont === null) return false
+  const insert = state.lineBreak + cont
+  view.dispatch({
+    changes: { from: sel.head, to: sel.head, insert },
+    selection: { anchor: sel.head + insert.length },
+    userEvent: 'input',
+    scrollIntoView: true,
+  })
+  // Advancing an ordered item can leave the rest of the run mis-numbered;
+  // heal it the same way the other list commands do.
+  if (splitListLine(line.text).kind === 'ordered') renumberDocument(view)
+  return true
+}
+
 // Wrap a built-in move-line command so an ordered list renumbers after the
 // move. Obsidian renumbers when you Alt+Up/Down a list item; this matches.
 function moveLineThenRenumber(base: Command): Command {
@@ -381,6 +506,18 @@ const obsidianTheme = EditorView.theme({
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
     backgroundColor: 'var(--obsidian-selection, #2b5a9b)',
   },
+  // Selection FOREGROUND (2026-06-10). drawSelection() hides only the native
+  // selection's background-color (`.cm-line ::selection { background-color:
+  // transparent !important }` in @codemirror/view) — the ::selection `color`
+  // still applies. Without it, accent-coloured glyphs (task `[x]` brackets,
+  // list markers, #tags, links — all hsl(217,88%,50%)) sat at ~1.4:1 against
+  // the blue selection layer and read as invisible ("selected text goes
+  // invisible", bug #38). Recolour selected glyphs to the standard editor
+  // text colour, which every preset guarantees ≥ 4.5:1 against the selection
+  // (themeSelectionContrast.test.ts).
+  '.cm-line::selection, .cm-line ::selection': {
+    color: 'var(--obsidian-text, #dadada)',
+  },
   '.cm-activeLine': { backgroundColor: 'rgba(255,255,255,0.025)' },
   // No display:none on .cm-gutters — basicSetup disables line-numbers
   // and fold-gutter (see <CodeMirror basicSetup={...} />), so the only
@@ -456,6 +593,38 @@ export function CodeMirrorEditor({
   const [wikilinkState, setWikilinkState] = useState<WikilinkState | null>(null)
   const [tagState, setTagState] = useState<TagState | null>(null)
 
+  // When collaboration is enabled the shared Y.Text is the SINGLE source of
+  // truth for the document content. The collab binding (yCollab) seeds the
+  // Y.Text with the note body after the first sync and replays it into the
+  // editor via its observer. If the editor ALSO started life holding the same
+  // body (value={initialContent}), that replayed insert lands on top of the
+  // existing text and the body is DOUBLED on screen — and the doubled text is
+  // what gets saved back to the note (= corruption that would sync to GitHub).
+  // So when collab is on we build the editor EMPTY and let the Y.Text populate
+  // it: the seeder sees its body exactly once, a joiner receives the shared
+  // body over the wire exactly once. When collab is off this is a no-op and
+  // the editor is byte-for-byte identical to before. getCollabUrlForNote() is
+  // the exact gate the collab effect below uses, so this branches together
+  // with it.
+  //
+  // Reactive inputs: the collaborationMode setting and this note's per-note
+  // active-collab state. Subscribing to both means flipping the setting or the
+  // EditorFooter "Live" toggle re-renders the editor with the correct
+  // seed-vs-empty branch and re-runs the collab effect (which keys on
+  // collabEnabled below). In 'per-note' mode an un-activated note resolves to
+  // null here — identical to 'off' — so it seeds locally and stays fast.
+  const collaborationMode = useSettingsStore(s => s.collaborationMode)
+  const noteCollabActive = useActiveCollabStore(s => s.activeNoteIds.has(noteId))
+  // Recomputed whenever mode / active flips; getCollabUrlForNote reads the same
+  // stores so the value agrees with what the effect will see.
+  const collabEnabled = getCollabUrlForNote(noteId) != null
+  // collaborationMode + noteCollabActive are referenced so the component
+  // re-renders (and effects re-run) when they change; getCollabUrlForNote
+  // reads them via getState() for the actual decision.
+  void collaborationMode
+  void noteCollabActive
+  const editorInitialValue = collabEnabled ? '' : initialContent
+
   // Live-collaboration (Phase B). A Compartment lets us swap the yCollab
   // binding in/out per note without rebuilding the whole (memoized)
   // extension list. The compartment is created ONCE and stays empty unless
@@ -471,6 +640,15 @@ export function CodeMirrorEditor({
   const autocorrectCompartmentRef = useRef(new Compartment())
   const editorAutocorrect = useSettingsStore(s => s.editorAutocorrect)
 
+  // History lives in its own compartment so the undo stack can be CLEARED on
+  // note change. The editor view is no longer torn down per note (we dropped
+  // the `key={noteId}` remount for speed), so a shared history would let
+  // Ctrl+Z undo across note boundaries — and worse, undo the doc-swap and
+  // replay the previous note's text into the current note. Reconfiguring the
+  // compartment re-creates the history field, which empties it. basicSetup's
+  // built-in history is disabled below so this is the only history extension.
+  const historyCompartmentRef = useRef(new Compartment())
+
   // Stable refs so extension callbacks always see the latest values
   const activeNotesRef = useRef(activeNotes)
   const navigateRef = useRef(onWikilinkNavigate)
@@ -483,6 +661,58 @@ export function CodeMirrorEditor({
   useEffect(() => {
     setTagState(null)
     setWikilinkState(null)
+  }, [noteId])
+
+  // Per-note reset for the reused editor view (no more keyed remount).
+  // This DRIVES the document swap itself rather than trusting
+  // react-codemirror's `value`-sync: that sync DEFERS the swap for 200ms
+  // after any keystroke (its "typing latch"), so switching notes right after
+  // typing left the previous note's text showing — sometimes until reload
+  // (the "16 and 17 look the same" bug, 2026-06-15). We run it as a PASSIVE
+  // effect (not useLayoutEffect): a layout effect does the full-doc replace +
+  // decoration rebuild SYNCHRONOUSLY before paint, which froze the UI on
+  // switch ("name changes, then the content lags"). A passive effect lets the
+  // new note's chrome paint immediately, then swaps the body a frame later —
+  // still deterministic (so the typing-latch race stays fixed), just
+  // non-blocking. Three things reset per note:
+  //   1. the document (to the new note's content),
+  //   2. the undo stack (so Ctrl+Z can't cross notes),
+  //   3. scroll + cursor (a reused view keeps the previous note's offsets).
+  // Under collaboration the shared Y.Text owns the document, so we skip the
+  // manual doc swap there and let the collab binding populate it.
+  const programmaticSwapRef = useRef(false)
+  useEffect(() => {
+    const view = cmRef.current?.view
+    if (!view) return
+    if (!collabEnabled) {
+      const next = editorInitialValue
+      if (view.state.doc.toString() !== next) {
+        // Mark the swap so handleChange skips the debounced save — this is the
+        // note's own content, and updateNote() is not idempotent (it bumps
+        // updatedAt, which would spuriously dirty the note on every switch).
+        programmaticSwapRef.current = true
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: next } })
+      }
+    }
+    // Clear the undo stack by toggling the history extension OFF then ON.
+    // history() shares a module-level StateField, so reconfiguring straight
+    // to a fresh history() PRESERVES the existing field (undo would still
+    // cross notes — caught by e2e/editor-reuse). Removing the extension drops
+    // the field entirely; re-adding it recreates an empty one.
+    const hist = historyCompartmentRef.current
+    view.dispatch({ effects: hist.reconfigure([]) })
+    view.dispatch({
+      selection: { anchor: 0 },
+      effects: hist.reconfigure(history()),
+    })
+    // A reused view keeps the previous note's scroll offset — jump to the top.
+    // scrollDOM is absent in the jsdom test view, so guard the assignment.
+    if (view.scrollDOM) view.scrollDOM.scrollTop = 0
+    // ONLY [noteId]: re-running on editorInitialValue would clear the undo
+    // stack and scroll-to-top on every keystroke-driven save. Post-switch
+    // content changes (e.g. a shell note's body streaming in) are handled by
+    // react-codemirror's own value-sync, which is reliable when not mid-typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [noteId])
 
   // Diff-gutter baseline (109): when the note changes — or after a
@@ -504,22 +734,25 @@ export function CodeMirrorEditor({
   }, [noteId, lastSyncedAt])
 
   // ── Live collaboration (Phase B) ────────────────────────────────────
-  // Bind a shared Y.Doc to the editor when collab is enabled. DORMANT by
-  // default: getConfiguredUrl() returns null unless NEXT_PUBLIC_YJS_WS_URL
-  // is a valid ws/wss URL, in which case this effect returns immediately —
-  // no Y.Doc, no WebSocket, no awareness, compartment stays empty.
+  // Bind a shared Y.Doc to the editor when collab is enabled FOR THIS NOTE.
+  // DORMANT by default: getCollabUrlForNote() returns null when no transport
+  // is configured, when collaborationMode is 'off', or (in 'per-note' mode)
+  // when the user hasn't explicitly activated collab for this note — in which
+  // case this effect returns immediately: no Y.Doc, no WebSocket, no
+  // awareness, compartment stays empty.
   //
-  // Keyed on noteId so the provider+doc tear down and re-create on note
-  // change. The room name is the note's STABLE collabId (lazily minted via
-  // the store) so a shared room survives renames / folder moves. Remote
-  // edits arrive as CodeMirror transactions → the existing onChange path
-  // persists them to the note store, and the diff-gutter baseline effect is
-  // independent so the gutter keeps working.
+  // Keyed on noteId AND collabEnabled so the provider+doc tear down and
+  // re-create on note change OR when the user toggles collab on/off for this
+  // note mid-session. The room name is the note's STABLE collabId (lazily
+  // minted via the store) so a shared room survives renames / folder moves.
+  // Remote edits arrive as CodeMirror transactions → the existing onChange
+  // path persists them to the note store, and the diff-gutter baseline effect
+  // is independent so the gutter keeps working.
   const githubUser = useGitHubStore(s => s.user)
   const githubUserRef = useRef(githubUser)
   useEffect(() => { githubUserRef.current = githubUser }, [githubUser])
   useEffect(() => {
-    const url = getConfiguredUrl()
+    const url = getCollabUrlForNote(noteId)
     if (!url) return // dormant: identical to pre-Phase-B behaviour
 
     // Mint (or reuse) the stable room id for this note.
@@ -557,6 +790,22 @@ export function CodeMirrorEditor({
       const freshView = cmRef.current?.view
       if (!freshView) return
       const note = useNoteStore.getState().notes.find(n => n.id === noteId)
+      // #186 anti-doubling: the shared Y.Text becomes the SINGLE source of
+      // truth once the binding attaches — the seeder seeds it from the note
+      // body, then yCollab replays that text into the editor via its observer.
+      // If the editor still holds the same body (which it does whenever collab
+      // is activated MID-SESSION for an already-open, locally-seeded note),
+      // that replay lands on top and the body doubles. So clear the editor to
+      // empty right before attaching. On a fresh note-open with collab already
+      // enabled, editorInitialValue was '' anyway, so this is a no-op there.
+      // Mark it programmatic so handleChange skips the debounced save (we are
+      // not editing the note, just handing the doc to the CRDT).
+      if (freshView.state.doc.length > 0) {
+        programmaticSwapRef.current = true
+        freshView.dispatch({
+          changes: { from: 0, to: freshView.state.doc.length, insert: '' },
+        })
+      }
       binding = createCollabBinding({
         url,
         room,
@@ -583,11 +832,16 @@ export function CodeMirrorEditor({
       }
       binding?.destroy()
       if (collabBindingRef.current === binding) collabBindingRef.current = null
+      // On deactivation (collab toggled off mid-session), the editor keeps
+      // whatever text the Y.Text last replayed into it — that IS the note's
+      // current content, so a follow-up edit saves it locally as normal. We do
+      // not re-seed here; the per-note swap effect only fires on noteId change.
     }
     // githubUser is intentionally read via ref (not a dep) so a login change
     // mid-session doesn't tear down the live document; the cursor label
-    // updates on the next note open. Re-key only on noteId.
-  }, [noteId])
+    // updates on the next note open. Re-key on noteId AND collabEnabled so the
+    // binding attaches/detaches when the user toggles collab for this note.
+  }, [noteId, collabEnabled])
 
   // Listen for "scroll to fragment" requests fired by the wikilink click
   // handler. The fragment is either a heading text or a `^block-id`; we
@@ -675,6 +929,10 @@ export function CodeMirrorEditor({
     autocorrectCompartmentRef.current.of(
       autocorrectAttrs(useSettingsStore.getState().editorAutocorrect),
     ),
+    // Undo history in a compartment so the per-note reset effect can clear it.
+    // basicSetup's own history() is disabled (history: false) so this is the
+    // single source of undo state; historyKeymap (still on) drives it.
+    historyCompartmentRef.current.of(history()),
     markdown({ base: markdownLanguage }),
     markdownLivePreview,
     tasksLivePreview,
@@ -689,6 +947,13 @@ export function CodeMirrorEditor({
       onWikilinkNavigate: (note) => navigateRef.current(note),
     }),
     diffGutterExtension,
+    // Collapsible heading sections (Obsidian parity). Adds a fold gutter with
+    // a chevron next to every ATX heading; clicking collapses everything under
+    // it until the next heading of the same-or-higher level. View-only — the
+    // markdown text is untouched, so collab + live-preview decorations + save
+    // all keep working. See foldableHeadings.ts for the range logic. Keyboard
+    // toggles (Mod-., Mod-Alt-[ / Mod-Alt-]) are wired in the keymap below.
+    foldableHeadings,
     // Built-in find / replace panel. `top: true` opens it above the
     // editor — matches VS Code / Obsidian placement. Keymap includes
     // Ctrl+F (find), Ctrl+H (replace), F3/Shift+F3 (next/prev), Esc
@@ -707,9 +972,13 @@ export function CodeMirrorEditor({
     ])),
     obsidianTheme,
     EditorView.lineWrapping,
+    // Hanging indent for soft-wrapped list lines: wrapped continuation rows
+    // align with the START of the BODY (after the marker) instead of column 0,
+    // matching Obsidian Live Preview. Visual only — never modifies markdown.
+    hangingIndentExtension,
     // Explicit drawSelection() so the .cm-selectionBackground layer is
     // guaranteed to render regardless of basicSetup defaults. We already paint
-    // that layer with var(--obsidian-highlight) (see obsidianTheme above), and
+    // that layer with var(--obsidian-selection) (see obsidianTheme above), and
     // globals.css carries a `::selection` fallback for the native path —
     // belt-and-suspenders so a future @uiw basicSetup change that drops
     // drawSelection() from defaults can't leave the selection invisible again.
@@ -729,10 +998,30 @@ export function CodeMirrorEditor({
     // "bookmark this page" dialog (Ctrl+D), which is interceptable (unlike
     // Ctrl+W). Replaces the old selectNextOccurrence binding we removed.
     { key: 'Mod-d', preventDefault: true, run: deleteLine },
+    // ── Heading folding (Obsidian parity) ──────────────────────────────────
+    // Mod+. toggles the fold on the heading section at the cursor. Mod+Alt+[
+    // / Mod+Alt+] fold / unfold every section (CodeMirror's default fold-all
+    // chords; the app's own foldKeymap is disabled in basicSetup so these
+    // don't double-fire). None of these collide with the editor's existing
+    // bindings or the app-level shortcuts (Ctrl+. and the Alt-bracket chords
+    // are unused — see src/utils/shortcuts.ts).
+    { key: 'Mod-.', preventDefault: true, run: toggleFold },
+    { key: 'Mod-Alt-[', preventDefault: true, run: foldAll },
+    { key: 'Mod-Alt-]', preventDefault: true, run: unfoldAll },
     // Enter on an EMPTY checkbox exits the list. No preventDefault: when it
-    // returns false (any other line) the event falls through to the markdown
-    // keymap's normal Enter continuation.
+    // returns false (any other line) the event falls through to the next Enter
+    // binding / the markdown keymap.
     { key: 'Enter', run: exitEmptyCheckboxOnEnter },
+    // Enter on a NON-EMPTY list/task line continues it tightly (one newline +
+    // marker), pre-empting the markdown keymap's loose-list continuation that
+    // would otherwise insert an extra blank line. Falls through (returns false)
+    // for plain lines and empty list items.
+    { key: 'Enter', run: continueListTight },
+    // Shift+Enter inside a list/task line: insert a continuation indent so the
+    // next line parses as a paragraph inside the same list item (instead of a
+    // top-level paragraph at column 0). Returns false on plain lines so the
+    // browser's default Shift+Enter (= plain newline) still runs there.
+    { key: 'Shift-Enter', run: continueListItemParagraph },
     // ── Obsidian-style list / todo commands ────────────────────────────────
     // (1) Mod+L — Toggle checkbox status (Obsidian default). Flip a task
     // done/undone; turn a plain/bullet/numbered line into a checkbox.
@@ -741,17 +1030,25 @@ export function CodeMirrorEditor({
     // line(s) through plain -> numbered ("1. ") -> task ("- [ ] ") -> plain.
     // Replaces the earlier trio of Mod+Shift+7/8/9 toggles. Separate from
     // Mod+L (which only toggles a checkbox done/undone).
+    // Spelled 'Mod-Alt-L' (capital, no explicit "Shift-" word) rather than
+    // 'Mod-Alt-Shift-l': CodeMirror's runHandlers() skips its case-insensitive
+    // base-key fallback whenever ctrlKey+altKey are both held on Windows (its
+    // AltGr-avoidance guard), so a lowercase-letter spec can never match
+    // event.key's uppercase 'L' there and the binding silently never fires.
+    // The uppercase form matches on the first (always-tried) lookup on every
+    // platform. See @codemirror/view's `runHandlers`/`modifiers` internals.
     {
-      key: 'Mod-Alt-Shift-l',
+      key: 'Mod-Alt-L',
       preventDefault: true,
       run: cycleListTypeCommand,
     },
     // (3) Mod+Alt+Shift+B — Toggle a plain bullet list ("- ") on the current
     // line(s). A STANDALONE toggle, NOT part of the Mod+Alt+Shift+L cycle:
     // a plain line gains "- ", a "- " bullet drops it. Multi-line aware,
-    // indentation preserved.
+    // indentation preserved. Same 'Mod-Alt-B' (not '...-Shift-b') spelling
+    // rationale as the cycle-list binding above.
     {
-      key: 'Mod-Alt-Shift-b',
+      key: 'Mod-Alt-B',
       preventDefault: true,
       run: toggleBulletCommand,
     },
@@ -951,20 +1248,63 @@ export function CodeMirrorEditor({
         event.preventDefault()
         const dropPos = view.posAtCoords({ x: event.clientX, y: event.clientY })
           ?? view.state.selection.main.head
-        insertImagesAt(view, images, dropPos)
+        const noteTitle = activeNotesRef.current.find(n => n.id === noteIdRef.current)?.title ?? ''
+        insertImagesAt(view, images, dropPos, collabBindingRef.current, noteTitle)
         return true
       },
       paste(event, view) {
         const files = Array.from(event.clipboardData?.files ?? [])
         const images = files.filter(f => f.type.startsWith('image/'))
+        const text = event.clipboardData?.getData('text/plain') ?? ''
+
+        // ── Image paste ──────────────────────────────────────────────────
         // Skip if no images, or if there's text alongside (rich paste — let
         // CodeMirror handle that path so user keeps the text).
-        if (images.length === 0) return false
-        const hasText = (event.clipboardData?.getData('text/plain') ?? '') !== ''
-        if (hasText) return false
+        if (images.length > 0) {
+          if (text !== '') return false
+          event.preventDefault()
+          const head = view.state.selection.main.head
+          const noteTitle = activeNotesRef.current.find(n => n.id === noteIdRef.current)?.title ?? ''
+          insertImagesAt(view, images, head, collabBindingRef.current, noteTitle)
+          return true
+        }
+
+        // ── URL paste → titled markdown link ─────────────────────────────
+        if (!isBareUrl(text)) return false
+        const url = text.trim()
+        const sel = view.state.selection.main
+
+        // URL over a selection: the selected text IS the title.
+        if (!sel.empty) {
+          const selected = view.state.sliceDoc(sel.from, sel.to)
+          // Selecting an existing URL and pasting another over it is a
+          // replace, not a link-wrap — fall through to default paste.
+          if (isBareUrl(selected)) return false
+          event.preventDefault()
+          const link = markdownLink(selected, url)
+          view.dispatch({
+            changes: { from: sel.from, to: sel.to, insert: link },
+            selection: { anchor: sel.from + link.length },
+          })
+          return true
+        }
+
+        // Clipboard carried an HTML anchor (copying a link element does
+        // this): use its text as the title, no network round-trip.
+        const anchor = anchorFromHtml(event.clipboardData?.getData('text/html') ?? '')
+        if (anchor && anchor.text !== url) {
+          event.preventDefault()
+          const link = markdownLink(anchor.text, url)
+          view.dispatch({
+            changes: { from: sel.head, to: sel.head, insert: link },
+            selection: { anchor: sel.head + link.length },
+          })
+          return true
+        }
+
+        // Bare URL: insert a placeholder and fetch the page title async.
         event.preventDefault()
-        const head = view.state.selection.main.head
-        insertImagesAt(view, images, head)
+        void insertLinkWithFetchedTitle(view, url, sel.head)
         return true
       },
       mousedown(event, view) {
@@ -1065,6 +1405,14 @@ export function CodeMirrorEditor({
   }, [wikilinkState])
 
   const handleChange = useCallback((value: string) => {
+    // The per-note layout effect swaps the document on note change; that swap
+    // fires this onChange. Skip the save for it — it is the note's own content
+    // and updateNote() bumps updatedAt, which would dirty the note (and churn
+    // sync) on every switch. Real edits fall through normally.
+    if (programmaticSwapRef.current) {
+      programmaticSwapRef.current = false
+      return
+    }
     debouncedSave(value)
     updateWikilinkState(value)
     updateTagState(value)
@@ -1115,9 +1463,8 @@ export function CodeMirrorEditor({
   return (
     <div className="flex-1 overflow-hidden h-full relative bg-obsidianBlack">
       <CodeMirror
-        key={noteId}
         ref={cmRef}
-        value={initialContent}
+        value={editorInitialValue}
         extensions={extensions}
         onChange={handleChange}
         onCreateEditor={(view) => {
@@ -1132,6 +1479,11 @@ export function CodeMirrorEditor({
           dropCursor: false,
           allowMultipleSelections: false,
           indentOnInput: false,
+          // History is provided via historyCompartmentRef so the per-note
+          // reset effect can clear the undo stack on note change. Disabling it
+          // here avoids a duplicate (uncleared) history field. historyKeymap
+          // stays enabled below and drives this compartment's history.
+          history: false,
           bracketMatching: false,
           closeBrackets: false,
           autocompletion: false,

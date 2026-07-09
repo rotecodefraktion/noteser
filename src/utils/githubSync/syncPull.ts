@@ -29,8 +29,19 @@ import {
   parseNote,
   guessMimeFromPath,
   isForeignVaultFile,
+  isUnchangedModuloNormalization,
 } from './internal'
 import type { PullClassification, PullOutcome } from './syncClassify'
+
+// Order-insensitive equality for two tag lists. Used by the collabId-only
+// convergence guard so a note whose bodies match but whose tag sets differ is
+// NOT silently overwritten (it falls through to the merge/conflict path).
+function sameTagSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = [...a].sort()
+  const sb = [...b].sort()
+  return sa.every((v, i) => v === sb[i])
+}
 
 export async function pullFromGitHub(input: {
   // Host abstraction for every remote read. The pull pipeline calls
@@ -179,6 +190,17 @@ export async function pullFromGitHub(input: {
       continue
     }
 
+    // do-not-sync (#179): a flagged note (the seeded Feature tour) is
+    // invisible to sync. Classify as `unchanged` so a legacy user's remote
+    // copy is neither pulled over the local note nor surfaced as a conflict
+    // tab, and the remoteCreated branch below cannot resurrect a duplicate
+    // at this path. The push side skips it symmetrically.
+    if (localMatch && localMatch.doNotSync) {
+      seenLocalIds.add(localMatch.id)
+      out.push({ kind: 'unchanged', noteId: localMatch.id })
+      continue
+    }
+
     // Fetch the remote content lazily — only when we need it. bke1:
     // decrypt the envelope when encryption is on; throws VaultLockedError
     // upstream if the user hasn't unlocked.
@@ -220,8 +242,12 @@ export async function pullFromGitHub(input: {
         return !remoteTree.has(gp)
       }
       // Path-form match: the note's computed repo path equals this remote path.
+      // do-not-sync (#179): a flagged note must never adopt a remote file —
+      // it does not participate in sync, so a user's own remote
+      // `Feature tour.md` materialises as a separate local note instead.
       const pathCandidates = notes.filter(n => {
         if (n.isDeleted) return false
+        if (n.doNotSync) return false
         if (seenLocalIds.has(n.id)) return false
         if (notePath(n, input.folders) !== path) return false
         return isUnlinked(n)
@@ -260,6 +286,8 @@ export async function pullFromGitHub(input: {
         const hashMatches: Note[] = []
         for (const n of notes) {
           if (n.isDeleted) continue
+          // do-not-sync (#179): flagged notes never adopt remote files.
+          if (n.doNotSync) continue
           if (seenLocalIds.has(n.id)) continue
           if (!isUnlinked(n)) continue
           // Content-hash adoption is for RENAMES: a note that was PUSHED before
@@ -294,7 +322,7 @@ export async function pullFromGitHub(input: {
       }
       const content = await loadRemote()
       const parsed = parseNote(content)
-      out.push({ kind: 'remoteCreated', path, remoteSha, remoteContent: content, tags: parsed.tags, body: parsed.body })
+      out.push({ kind: 'remoteCreated', path, remoteSha, remoteContent: content, tags: parsed.tags, body: parsed.body, collabId: parsed.collabId })
       continue
     }
 
@@ -337,10 +365,27 @@ export async function pullFromGitHub(input: {
     } else if (remoteChanged && !localChanged) {
       const content = await loadRemote()
       const parsed = parseNote(content)
-      out.push({ kind: 'remoteUpdated', noteId: localMatch.id, remoteSha, remoteContent: content, tags: parsed.tags, body: parsed.body, ...(adoptPath ? { adoptPath } : {}) })
+      out.push({ kind: 'remoteUpdated', noteId: localMatch.id, remoteSha, remoteContent: content, tags: parsed.tags, body: parsed.body, collabId: parsed.collabId, ...(adoptPath ? { adoptPath } : {}) })
     } else if (remoteChanged && localChanged) {
       const content = await loadRemote()
       const parsed = parseNote(content)
+
+      // collabId-only convergence (Feature B sync-safety): if the local and
+      // remote BODIES (modulo line-ending/trailing-newline normalization) AND
+      // tag sets are identical, the ONLY thing that differs is the collabId
+      // frontmatter metadata — NOT user content. That is not a real conflict:
+      // take the remote version so the repo's collabId wins and collaborators
+      // converge on one room, WITHOUT prompting a content-conflict tab. The
+      // body-equality guard means this can never fire when the user actually
+      // edited text (bodies would differ → fall through to merge/conflict).
+      const localParsed = parseNote(localContent)
+      if (
+        isUnchangedModuloNormalization(localParsed.body, parsed.body) &&
+        sameTagSet(localParsed.tags, parsed.tags)
+      ) {
+        out.push({ kind: 'remoteUpdated', noteId: localMatch.id, remoteSha, remoteContent: content, tags: parsed.tags, body: parsed.body, collabId: parsed.collabId, ...(adoptPath ? { adoptPath } : {}) })
+        continue
+      }
 
       // Try a line-level 3-way merge before bothering the user. If the local
       // and remote edits don't overlap line-wise we can auto-merge and the
@@ -380,6 +425,7 @@ export async function pullFromGitHub(input: {
           remoteContent: content,
           remoteTags: parsed.tags,
           remoteBody: parsed.body,
+          remoteCollabId: parsed.collabId,
           ...(adoptPath ? { adoptPath } : {}),
         })
       }
@@ -572,6 +618,10 @@ export async function pullFromGitHub(input: {
   // 2. Local notes that had a gitPath but are missing from the remote tree.
   for (const note of notes) {
     if (note.isDeleted || !note.gitPath || seenLocalIds.has(note.id)) continue
+    // do-not-sync (#179): a flagged note is invisible to sync — when a legacy
+    // user manually deletes its remote copy, the local note must NOT be
+    // soft-deleted (remoteDeleted) or opened as a conflict tab. Skip it.
+    if (note.doNotSync) continue
     if (remoteTree.has(note.gitPath)) continue
     // foreign-vault-files: a foreign mirror whose remote file is gone is a
     // clean delete. There is nothing the user could have edited locally (the
@@ -732,6 +782,7 @@ export async function pullFromZipball(input: {
         remoteContent: content,
         tags: parsed.tags,
         body: parsed.body,
+        collabId: parsed.collabId,
       })
       continue
     }

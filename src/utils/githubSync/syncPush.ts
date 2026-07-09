@@ -12,9 +12,10 @@ import { gitBlobSha } from '../github'
 import type { GitHostProvider, FileChange, CommitProgress } from '../gitHost/types'
 import { _resetUploadedShaCache } from '../gitHost/githubProvider'
 import {
-  listAttachmentPaths,
+  listAttachmentPathsTracked,
   getAttachmentBlob,
-  getAttachmentGitSha,
+  getAttachmentGitShaTracked,
+  getAttachmentDoNotSyncTracked,
   getAttachmentTombstones,
   clearAttachmentTombstones,
 } from '../attachments'
@@ -130,7 +131,16 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // overwrite the real remote file with empty bytes. Same dropping pattern
   // as shells: out of `activeNotes` keeps them out of BOTH `desired` and the
   // deletion loop in step 4.
-  const activeNotes = notes.filter(n => !n.isDeleted && n.contentLoaded !== false && n.kind !== 'foreign')
+  //
+  // do-not-sync (#179): ALSO exclude `doNotSync: true` notes (the seeded
+  // Feature tour). They are app-local content that must never be serialized
+  // into the push tree — no blob, no rename/delete propagation. Same dropping
+  // pattern as shells/foreign. We keep them in a separate list because their
+  // remote paths (legacy users may have pushed the note before the flag
+  // existed) still need delete-safety-net protection below.
+  const syncEligibleNotes = notes.filter(n => !n.isDeleted && n.contentLoaded !== false && n.kind !== 'foreign')
+  const doNotSyncNotes = syncEligibleNotes.filter(n => n.doNotSync === true)
+  const activeNotes = syncEligibleNotes.filter(n => n.doNotSync !== true)
   const desired = new Map<string, { content: string; note: Note }>()
   for (const note of activeNotes) {
     // preserve-gitpath-on-push: a synced note pushes to its EXISTING gitPath
@@ -352,18 +362,53 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // attachment whose SHA differs from the remote. Files only present locally
   // get created remotely; files present in both get updated when their content
   // drifts. The provider handles the binary blob upload + content cache.
-  const localAttachmentPaths = await listAttachmentPaths()
+  //
+  // attachment-timeout-retry: a stalled IDB read (mobile Safari) must not
+  // silently look like "zero local attachments" — that would push a commit
+  // that omits real attachments while reporting the sync as successful, and
+  // nothing would ever retry it (the attachment was already durably saved
+  // locally, just never uploaded). So the *Tracked reads report `timedOut`
+  // and, the moment any one of them fires, we abort the ENTIRE attachment
+  // section for this cycle: no partial plan, no FileChanges. Because nothing
+  // gets marked as pushed, the next sync's 3b runs exactly as if this one
+  // never attempted it — that's what makes the retry automatic without a
+  // dedicated retry-queue.
+  let attachmentSyncSkipped = false
+  const { value: localAttachmentPaths, timedOut: listTimedOut } = await listAttachmentPathsTracked()
+  if (listTimedOut) attachmentSyncSkipped = true
+  interface AttachmentPlan { path: string; localSha: string; remoteSha: string | undefined }
+  const attachmentPlan: AttachmentPlan[] = []
   for (const path of localAttachmentPaths) {
+    if (attachmentSyncSkipped) break
     if (pushMatcher.isIgnored(path)) continue
-    const localSha = await getAttachmentGitSha(path)
+    // do-not-sync (#179): app-local attachments (the seeded feature-tour
+    // screenshots) are flagged on their stored record and never enter the
+    // push plan — no hash, no upload, no tree entry. This is a per-record
+    // flag, NOT a path exclusion: a user's own folder that happens to be
+    // named `feature-tour/` syncs normally.
+    const { value: doNotSync, timedOut: dnsTimedOut } = await getAttachmentDoNotSyncTracked(path)
+    if (dnsTimedOut) { attachmentSyncSkipped = true; break }
+    if (doNotSync) continue
+    const { value: localSha, timedOut: shaTimedOut } = await getAttachmentGitShaTracked(path)
+    if (shaTimedOut) { attachmentSyncSkipped = true; break }
     if (!localSha) continue
     const remoteSha = remoteTree.get(path)
-    if (remoteSha === localSha) continue
-    const blob = await getAttachmentBlob(path)
+    attachmentPlan.push({ path, localSha, remoteSha })
+  }
+  // On a skipped cycle the plan is discarded wholesale — no partial pushes.
+  // The provider owns the upload cache + progress, so the plan only needs
+  // the changed entries turned into FileChanges.
+  const effectiveAttachmentPlan = attachmentSyncSkipped ? [] : attachmentPlan
+  if (attachmentSyncSkipped) {
+    console.warn('[syncPush] attachment sync skipped this cycle (IndexedDB stalled) — will retry next sync.')
+  }
+  for (const plan of effectiveAttachmentPlan) {
+    if (plan.remoteSha === plan.localSha) continue
+    const blob = await getAttachmentBlob(plan.path)
     if (!blob) continue
     const contentBytes = new Uint8Array(await blob.arrayBuffer())
-    changes.push({ op: remoteSha ? 'update' : 'create', path, contentBytes, sha: remoteSha })
-    if (remoteSha) updated++; else created++
+    changes.push({ op: plan.remoteSha ? 'update' : 'create', path: plan.path, contentBytes, sha: plan.remoteSha })
+    if (plan.remoteSha) updated++; else created++
   }
 
   // 3c. Apply attachment tombstones — paths the user explicitly deleted
@@ -371,7 +416,12 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // re-download them every cycle (the orphan-comes-back bug). We only
   // delete entries that actually exist remotely; stale tombstones (file
   // already gone remotely) get cleared too.
-  const tombstones = await getAttachmentTombstones()
+  //
+  // Skipped alongside 3b when attachment state is untrustworthy this cycle:
+  // consuming tombstones here would clear them even though we never confirmed
+  // what's actually on disk, and a deletion decided from partial/absent local
+  // state is exactly the kind of "confirmed" bookkeeping we must not write.
+  const tombstones = attachmentSyncSkipped ? [] : await getAttachmentTombstones()
   const consumedTombstones: string[] = []
   for (const path of tombstones) {
     const remoteSha = remoteTree.get(path)
@@ -436,10 +486,22 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // tree, so we never pay for paths we wouldn't delete anyway).
   const protectedRemotePaths = new Set<string>(desiredPaths)
   {
+    // do-not-sync (#179): a flagged note never pushes, but a LEGACY user's
+    // remote may still hold its file (pushed before the flag existed). That
+    // path must be protected from deletion — e.g. the tour seeder soft-deletes
+    // duplicate tour notes, and a soft-deleted duplicate sharing the flagged
+    // live note's gitPath must not sha:null the file the live note maps to.
+    // Protect by stored path, by current computed path, and (below) by
+    // content/baseline SHA, exactly like live active notes.
+    for (const note of doNotSyncNotes) {
+      if (note.gitPath) protectedRemotePaths.add(note.gitPath)
+      protectedRemotePaths.add(pushPath(note, folders))
+    }
+    const liveProtectedNotes = [...activeNotes, ...doNotSyncNotes]
     // Map remote path → its blob SHA, but only for paths some live note could
     // be defending. We need a SHA→paths index to test content equality.
     const livePlainShaByNote = new Map<string, string>()
-    for (const note of activeNotes) {
+    for (const note of liveProtectedNotes) {
       const sha = await gitBlobSha(serializeNote(note))
       livePlainShaByNote.set(note.id, sha)
     }
@@ -447,7 +509,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     // Also count any baseline SHA a live note last pushed — a note whose body
     // hasn't been re-serialized identically (e.g. non-canonical remote) is
     // still defended by the SHA it was pushed as.
-    for (const note of activeNotes) {
+    for (const note of liveProtectedNotes) {
       if (note.gitLastPushedSha) liveShaSet.add(note.gitLastPushedSha)
     }
     for (const [path, remoteSha] of remoteTree) {
@@ -471,6 +533,11 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     // it must never push a delete to the remote even if the user (somehow)
     // soft-deletes the mirror locally. Just skip it; the real file stays put.
     if (note.kind === 'foreign') continue
+    // do-not-sync (#179): a flagged note never touches the remote, deletes
+    // included. Soft-deleting the seeded tour note locally must not emit a
+    // sha:null for a legacy user's remote copy — remote cleanup is manual.
+    // Skipping also leaves its git fields intact in case it is restored.
+    if (note.doNotSync) continue
     if (note.isDeleted && note.gitPath && remoteTree.has(note.gitPath)) {
       // Only delete if no active note has already moved into that path AND no
       // live note's content maps to it. The protectedRemotePaths check is the
@@ -496,7 +563,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
     // already gone remotely) so they don't re-attempt every sync.
     if (consumedTombstones.length > 0) await clearAttachmentTombstones(consumedTombstones)
     return {
-      result: { unchanged: true, created: 0, updated: 0, deleted: 0, commitSha: parentCommitSha, commitUrl: null },
+      result: { unchanged: true, created: 0, updated: 0, deleted: 0, commitSha: parentCommitSha, commitUrl: null, attachmentSyncSkipped },
       pathUpdates,
       vaultSettingsHashPushed,
       vaultGitignorePushed,
@@ -555,7 +622,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   // exactly like the old empty-tree skip did.
   if (!commit.committed) {
     return {
-      result: { unchanged: true, created: 0, updated: 0, deleted: 0, commitSha: commit.commitSha, commitUrl: commit.commitUrl },
+      result: { unchanged: true, created: 0, updated: 0, deleted: 0, commitSha: commit.commitSha, commitUrl: commit.commitUrl, attachmentSyncSkipped },
       pathUpdates,
       vaultSettingsHashPushed,
       vaultGitignorePushed,
@@ -563,7 +630,7 @@ export async function syncToGitHub(input: SyncInput): Promise<SyncOutcome> {
   }
 
   return {
-    result: { unchanged: false, created, updated, deleted, commitSha: commit.commitSha, commitUrl: commit.commitUrl },
+    result: { unchanged: false, created, updated, deleted, commitSha: commit.commitSha, commitUrl: commit.commitUrl, attachmentSyncSkipped },
     pathUpdates,
     vaultSettingsHashPushed,
     vaultGitignorePushed,

@@ -10,14 +10,17 @@
 import {
   isWorkerToHost,
   MAX_ENVELOPE_BYTES,
+  MAX_HF_EVENTS_PER_SECOND,
   MAX_MESSAGES_PER_SECOND,
   MAX_VNODE_EVENTS_PER_SECOND,
   VAULT_EVENT_DEBOUNCE_MS,
   type HostToWorker,
   type HostVNodeEvent,
+  type InteractionKind,
   type WorkerToHost,
   type NoteWithBodyWire,
 } from './protocol'
+import { sanitizeSvgPositionPatches, type SvgPositionPatch } from './svgPositionPatch'
 import type { PluginManifest, PluginPermission } from './manifest'
 
 export interface InstalledPlugin {
@@ -54,6 +57,14 @@ export interface PluginHostOptions {
    *  without restarting the plugin (the existing subscriber's
    *  unsubscribe is still callable; it just receives no events). */
   isPermissionRevoked?: (pluginId: string, permission: PluginPermission) => boolean
+  /** v1.3 (L1) — override the frame scheduler used to flush coalesced
+   *  high-frequency VNode events. Production uses `requestAnimationFrame`;
+   *  tests inject a capturing scheduler so they can flush deterministically.
+   *  Must return a handle `cancelFrame` can cancel. */
+  requestFrame?: (cb: () => void) => number
+  /** Cancel a handle returned by `requestFrame`. Defaults to
+   *  `cancelAnimationFrame` / `clearTimeout`. */
+  cancelFrame?: (handle: number) => void
 }
 
 export interface MinimalWorker {
@@ -123,6 +134,18 @@ export type PluginHostEvent =
     }
   | { type: 'rateLimited'; pluginId: string }
   | { type: 'vnodeEventRateLimited'; pluginId: string }
+  | {
+      /** v1.3 (L4) — worker streamed node-position patches for an
+       *  interactive surface's mounted svg. The surface adapter applies
+       *  them directly to the DOM via `applySvgPositionPatches`, with no
+       *  React re-render. `viewId` / `panelId` name the target surface;
+       *  both absent means the single active interactive surface. */
+      type: 'svgPositionsPatch'
+      pluginId: string
+      viewId?: string
+      panelId?: string
+      patches: ReadonlyArray<SvgPositionPatch>
+    }
 
 /** Discriminated union over the four vault.write ops carried in a
  *  `worker:requestVaultWrite` envelope. Identical shape to the wire
@@ -169,6 +192,15 @@ interface WorkerEntry {
   vnodeEventWindowStart: number
   vnodeEventsInWindow: number
   vnodeEventRateLimitWarned: boolean
+  /** v1.3 (L1) — separate sliding-window budget for HIGH-FREQUENCY
+   *  VNode events (`onPointerMove`). Independent of the discrete
+   *  `vnodeEvent*` window above; capped at `MAX_HF_EVENTS_PER_SECOND`. */
+  hfEventWindowStart: number
+  hfEventsInWindow: number
+  hfRateLimitWarned: boolean
+  /** Latest-wins coalescing buffer, keyed by `${event} ${target}`.
+   *  Flushed one entry per key per rAF tick. */
+  hfCoalesced: Map<string, { source: HostVNodeEvent['source']; event: string; payload: unknown }>
 }
 
 interface VaultSubscription {
@@ -196,6 +228,10 @@ export class PluginHost {
   private readonly listeners = new Set<PluginHostListener>()
   private seqCounter = 0
   private readonly opts: PluginHostOptions
+  /** v1.3 (L1) — one frame flush is scheduled at a time across all
+   *  plugins; the tick drains every plugin's coalescing buffer. */
+  private hfFlushScheduled = false
+  private hfFlushHandle: number | null = null
 
   constructor(opts: PluginHostOptions = {}) {
     this.opts = opts
@@ -269,6 +305,10 @@ export class PluginHost {
       vnodeEventWindowStart: nowMs(),
       vnodeEventsInWindow: 0,
       vnodeEventRateLimitWarned: false,
+      hfEventWindowStart: nowMs(),
+      hfEventsInWindow: 0,
+      hfRateLimitWarned: false,
+      hfCoalesced: new Map(),
     }
     this.workers.set(pluginId, entry)
 
@@ -323,6 +363,7 @@ export class PluginHost {
     if (!entry) return
     this.clearVaultDebounce(entry)
     entry.vaultSubs.clear()
+    entry.hfCoalesced.clear()
     try {
       entry.worker.terminate()
     } catch {
@@ -422,10 +463,21 @@ export class PluginHost {
     source: HostVNodeEvent['source'],
     event: string,
     payload: unknown,
+    options?: { highFrequency?: boolean; interaction?: InteractionKind },
   ): void {
     const entry = this.workers.get(pluginId)
     if (!entry) return
     if (typeof event !== 'string' || event.length === 0) return
+
+    // v1.3 — high-frequency events (pointer move / wheel / hover) take
+    // the coalescing path and the separate HF budget, gated on the
+    // matching surface interaction opt-in. They never touch the discrete
+    // window below. An HF event with no explicit kind defaults to
+    // `'pointer'` (L1 behaviour).
+    if (options?.highFrequency) {
+      this.enqueueHighFrequency(entry, source, event, payload, options.interaction ?? 'pointer')
+      return
+    }
 
     const now = nowMs()
     if (now - entry.vnodeEventWindowStart >= 1000) {
@@ -449,6 +501,80 @@ export class PluginHost {
       payload,
       source,
     })
+  }
+
+  // ── v1.3 (L1) high-frequency event coalescing ──────────────────────────
+  //
+  // onPointerMove fires far faster than a worker can usefully consume.
+  // We collapse it to at most one event per (pluginId, event-name,
+  // target) per animation frame (latest payload wins), draw flushes from
+  // a SEPARATE budget (`MAX_HF_EVENTS_PER_SECOND`), and only do any of
+  // this for surfaces that opted into `interaction.pointer` in their
+  // manifest. A surface with no opt-in drops HF events on the floor —
+  // the discrete pointerdown/up path is unaffected.
+
+  private enqueueHighFrequency(
+    entry: WorkerEntry,
+    source: HostVNodeEvent['source'],
+    event: string,
+    payload: unknown,
+    interaction: InteractionKind,
+  ): void {
+    if (!surfaceHasInteraction(entry.plugin.manifest, source, interaction)) return
+    const key = `${event} ${extractTarget(payload) ?? ''}`
+    entry.hfCoalesced.set(key, { source, event, payload })
+    this.scheduleHfFlush()
+  }
+
+  private scheduleHfFlush(): void {
+    if (this.hfFlushScheduled) return
+    this.hfFlushScheduled = true
+    this.hfFlushHandle = this.requestFrame(() => {
+      this.hfFlushScheduled = false
+      this.hfFlushHandle = null
+      this.flushHighFrequency()
+    })
+  }
+
+  /** Drain every plugin's coalescing buffer, charging each flushed event
+   *  to that plugin's HF budget. Public so tests can flush
+   *  deterministically when they inject a no-op `requestFrame`. */
+  flushHighFrequency(): void {
+    const now = nowMs()
+    for (const entry of this.workers.values()) {
+      if (entry.hfCoalesced.size === 0) continue
+      if (now - entry.hfEventWindowStart >= 1000) {
+        entry.hfEventWindowStart = now
+        entry.hfEventsInWindow = 0
+        entry.hfRateLimitWarned = false
+      }
+      const pending = Array.from(entry.hfCoalesced.values())
+      entry.hfCoalesced.clear()
+      const pluginId = entry.plugin.manifest.id
+      for (const item of pending) {
+        entry.hfEventsInWindow++
+        if (entry.hfEventsInWindow > MAX_HF_EVENTS_PER_SECOND) {
+          if (!entry.hfRateLimitWarned) {
+            entry.hfRateLimitWarned = true
+            this.emit({ type: 'vnodeEventRateLimited', pluginId })
+          }
+          continue
+        }
+        this.send(pluginId, {
+          type: 'host:vnodeEvent',
+          seq: ++this.seqCounter,
+          event: item.event,
+          payload: item.payload,
+          source: item.source,
+        })
+      }
+    }
+  }
+
+  private requestFrame(cb: () => void): number {
+    if (this.opts.requestFrame) return this.opts.requestFrame(cb)
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(cb)
+    return setTimeout(cb, 16) as unknown as number
   }
 
   /**
@@ -929,6 +1055,24 @@ export class PluginHost {
         })
         return
       }
+
+      case 'worker:patchSvgPositions': {
+        // v1.3 (L4) — position-patch fast path. The oversized-envelope
+        // guard above already rejected anything past MAX_ENVELOPE_BYTES;
+        // here we sanitise the patch shape (drop non-string ids /
+        // non-finite coords) before handing the surface adapter a clean
+        // {id,x,y}[] to apply directly to the DOM.
+        const patches = sanitizeSvgPositionPatches(msg.patches)
+        if (patches.length === 0) return
+        this.emit({
+          type: 'svgPositionsPatch',
+          pluginId,
+          ...(typeof msg.viewId === 'string' ? { viewId: msg.viewId } : {}),
+          ...(typeof msg.panelId === 'string' ? { panelId: msg.panelId } : {}),
+          patches,
+        })
+        return
+      }
     }
   }
 
@@ -1172,4 +1316,35 @@ function hasSub(entry: WorkerEntry, event: VaultEventName): boolean {
     if (sub.event === event) return true
   }
   return false
+}
+
+/** v1.3 — true when the surface that produced an event declared the
+ *  matching `interaction` sub-flag in the manifest (`pointer` for move,
+ *  `wheel` for wheel, `hover` for enter/leave). Code-block renderers
+ *  have no interaction opt-in, so they never take the HF path. */
+function surfaceHasInteraction(
+  manifest: PluginManifest,
+  source: HostVNodeEvent['source'],
+  kind: InteractionKind,
+): boolean {
+  if (source.kind === 'fullscreen') {
+    const view = manifest.surfaces.fullscreenViews?.find((v) => v.id === source.viewId)
+    return view?.interaction?.[kind] === true
+  }
+  if (source.kind === 'panel') {
+    const panel = manifest.surfaces.sidebarPanels?.find((p) => p.id === source.panelId)
+    return panel?.interaction?.[kind] === true
+  }
+  return false
+}
+
+/** Pull the coalescing `target` out of a pointer payload. Only a string
+ *  target participates in the key; anything else collapses to the
+ *  no-target bucket. */
+function extractTarget(payload: unknown): string | null {
+  if (payload !== null && typeof payload === 'object' && 'target' in payload) {
+    const t = (payload as { target: unknown }).target
+    return typeof t === 'string' ? t : null
+  }
+  return null
 }

@@ -67,6 +67,14 @@ export const SETTINGS_CATALOG: readonly SettingsCatalogEntry[] = [
     keywords: ['delete', 'trash', 'remove'],
   },
   {
+    id: 'general.trashFolderName',
+    categoryId: 'general',
+    categoryLabel: 'General',
+    label: 'Trash folder',
+    description: 'Display name for the trash row in the sidebar. Renaming is cosmetic and syncs across devices; the trash never appears in your sync repo.',
+    keywords: ['trash', 'folder', 'name', 'rename', 'recycle', 'bin'],
+  },
+  {
     id: 'general.confirmBeforeTrash',
     categoryId: 'general',
     categoryLabel: 'General',
@@ -175,6 +183,14 @@ export const SETTINGS_CATALOG: readonly SettingsCatalogEntry[] = [
     keywords: ['tabs', 'startup', 'restore', 'session'],
   },
   {
+    id: 'editor.collaborationMode',
+    categoryId: 'editor',
+    categoryLabel: 'Editor',
+    label: 'Collaboration',
+    description: 'Real-time editing scope. Off keeps notes solo and fast. Per-note connects only for notes you set Live or open from a share link. Whole repo makes every note live.',
+    keywords: ['collaboration', 'collab', 'live', 'real-time', 'realtime', 'share', 'yjs', 'websocket', 'multiplayer'],
+  },
+  {
     id: 'editor.taskListDensity',
     categoryId: 'editor',
     categoryLabel: 'Editor',
@@ -209,6 +225,14 @@ export const SETTINGS_CATALOG: readonly SettingsCatalogEntry[] = [
     label: 'Attachments folder',
     description: 'Folder where new attachments are stored. Existing files keep their original path.',
     keywords: ['attachment', 'folder', 'images', 'files'],
+  },
+  {
+    id: 'attachments.filenamePattern',
+    categoryId: 'attachments',
+    categoryLabel: 'Attachments',
+    label: 'Filename pattern',
+    description: 'Filename for new pasted/dropped images. Tokens: {date} {date:FORMAT} {noteTitle} {originalName} {counter}.',
+    keywords: ['attachment', 'filename', 'pattern', 'paste', 'rename', 'image'],
   },
   {
     id: 'attachments.cleanupOrphans',
@@ -442,6 +466,14 @@ export const SETTINGS_CATALOG: readonly SettingsCatalogEntry[] = [
   },
 
   // ── Plugins ─────────────────────────────────────────────────────────
+  {
+    id: 'plugins.builtin',
+    categoryId: 'plugins',
+    categoryLabel: 'Plugins',
+    label: 'Built-in plugins',
+    description: 'One-click install for the first-party plugins that ship with noteser: Graph view, Kanban boards, callouts, word count, and more.',
+    keywords: ['plugin', 'builtin', 'bundled', 'graph', 'kanban', 'callout', 'install'],
+  },
   {
     id: 'plugins.add',
     categoryId: 'plugins',

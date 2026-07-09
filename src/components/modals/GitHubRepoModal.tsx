@@ -15,6 +15,7 @@ import { Modal, Button } from '@/components/ui'
 import { useUIStore, useGitHubStore, useWorkspaceStore, useNoteStore, useFolderStore } from '@/stores'
 import { makeGitHostProvider } from '@/utils/gitHost'
 import type { HostRepo } from '@/utils/gitHost'
+import { withTokenRefresh } from '@/utils/tokenRefresh'
 import { switchVault } from '@/utils/switchVault'
 import { getUnpushedChangeCount, discardUnpushedChanges } from '@/utils/dirtyState'
 import { useGitHubSync } from '@/hooks/useGitHubSync'
@@ -58,14 +59,16 @@ export const GitHubRepoModal = () => {
   const [newPrivate, setNewPrivate] = useState(true)
   const [creating, setCreating] = useState(false)
 
-  // Fetch repo list when the modal opens.
+  // Fetch repo list when the modal opens. Wrapped in withTokenRefresh so an
+  // expired OAuth token auto-renews instead of 401-ing the list (matches how
+  // the sync pull/push are wrapped); a ReconnectRequiredError message lands
+  // in the error view like any other failure.
   useEffect(() => {
     if (!isOpen || !token) return
     setView({ kind: 'list' })
     setSearch('')
     setLoading(true)
-    const provider = makeGitHostProvider({ host, token, baseUrl })
-    provider.listRepos()
+    withTokenRefresh(tok => makeGitHostProvider({ host, token: tok, baseUrl }).listRepos())
       .then((rs) => {
         setRepos(rs)
         setLoading(false)
@@ -146,8 +149,9 @@ export const GitHubRepoModal = () => {
     if (!token || !newName.trim()) return
     setCreating(true)
     try {
-      const provider = makeGitHostProvider({ host, token, baseUrl })
-      const created = await provider.createRepo(newName.trim(), newPrivate)
+      const created = await withTokenRefresh(tok =>
+        makeGitHostProvider({ host, token: tok, baseUrl }).createRepo(newName.trim(), newPrivate),
+      )
       const target: SyncRepo = {
         owner: created.owner,
         name: created.name,

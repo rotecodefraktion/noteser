@@ -1,21 +1,27 @@
 'use client'
 
 import { useMemo } from 'react'
-import { ArrowPathIcon, FireIcon, SignalIcon, SignalSlashIcon } from '@heroicons/react/24/outline'
+import { ArrowPathIcon, FireIcon, SignalIcon, SignalSlashIcon, ShareIcon } from '@heroicons/react/24/outline'
 import { extractTags } from '@/utils/tags'
-import { useGitHubStore, useNoteStore, useUIStore, useSettingsStore, useFolderStore } from '@/stores'
+import { useGitHubStore, useNoteStore, useUIStore, useSettingsStore, useFolderStore, useWorkspaceStore } from '@/stores'
+import { useToastStore } from '@/stores/toastStore'
 import { classifyPendingChanges, totalPendingCount } from '@/utils/syncChanges'
 import { computeStreakFromDateStrings, dailyDateSet } from '@/utils/dailyStreak'
-import { useCollaboration } from '@/hooks/useCollaboration'
-import type { Note } from '@/types'
+import { useCollaboration, getConfiguredUrl } from '@/hooks/useCollaboration'
+import { buildCollabShareLink } from '@/utils/collabShare'
+import { useActiveCollabStore } from '@/stores/activeCollabStore'
+import { useHydration } from '@/hooks'
 
-interface EditorFooterProps {
-  note: Note
-}
-
-// Slim status bar at the bottom of a pane. Matches Obsidian's status-bar
-// placement: sync/branch context on the left, counts on the right.
-export const EditorFooter = ({ note }: EditorFooterProps) => {
+// App-wide status bar — ONE slim strip across the bottom of the window
+// (VS Code / Obsidian placement), not one per pane. Vertical splits used
+// to leave a per-pane copy of this bar stranded mid-screen between two
+// stacked editors. Sync/branch context on the left; the right side shows
+// counts for the ACTIVE pane's active note (merge views, the Welcome tab,
+// and an empty workspace keep the bar but drop the note segments).
+export const EditorFooter = () => {
+  // Persisted stores hydrate client-side only; render the bare shell
+  // until then so SSR and the first client paint stay identical.
+  const hydrated = useHydration()
   const syncRepo = useGitHubStore(s => s.syncRepo)
   const lastSyncedAt = useGitHubStore(s => s.lastSyncedAt)
   const isSyncing = useGitHubStore(s => s.isSyncing)
@@ -23,9 +29,17 @@ export const EditorFooter = ({ note }: EditorFooterProps) => {
   const folders = useFolderStore(s => s.folders)
   const setCurrentView = useUIStore(s => s.setCurrentView)
 
-  const tagCount = extractTags(note.content).length
-  const wordCount = note.content.trim().split(/\s+/).filter(Boolean).length
-  const charCount = note.content.length
+  // Active pane → active tab → note (only when that tab is a note tab).
+  const activeNoteId = useWorkspaceStore(s => {
+    const pane = s.panes.find(p => p.id === s.activePaneId) ?? s.panes[0]
+    const tab = pane?.tabs.find(t => t.id === pane.activeTabId)
+    return tab?.kind === 'note' ? tab.noteId : null
+  })
+  const note = notes.find(n => n.id === activeNoteId) ?? null
+
+  const tagCount = note ? extractTags(note.content).length : 0
+  const wordCount = note ? note.content.trim().split(/\s+/).filter(Boolean).length : 0
+  const charCount = note ? note.content.length : 0
 
   // Daily-note streak — derived from active note titles + the user's
   // dailyNoteDateFormat. Memoised so we don't recompute on every
@@ -75,7 +89,7 @@ export const EditorFooter = ({ note }: EditorFooterProps) => {
       data-testid="status-bar-footer"
     >
       <div className="flex items-center gap-3 truncate">
-        {syncRepo && (
+        {hydrated && syncRepo && (
           <>
             <span className="truncate" title={`${syncRepo.owner}/${syncRepo.name}`}>
               {syncRepo.owner}/{syncRepo.name}
@@ -112,34 +126,153 @@ export const EditorFooter = ({ note }: EditorFooterProps) => {
         )}
       </div>
       <div className="flex items-center gap-4 shrink-0">
-        <CollabPill />
-        {streak.length >= 2 && (
-          <span
-            className="flex items-center gap-1 text-orange-400"
-            title={streak.includesToday
-              ? `${streak.length}-day daily-note streak — keep it going!`
-              : `${streak.length}-day streak — write today's note to keep it alive.`}
-            data-testid="status-bar-streak"
-          >
-            <FireIcon className="w-3 h-3" />
-            <span>{streak.length}d</span>
-          </span>
+        {hydrated && (
+          <>
+            <ShareCollabButton noteId={activeNoteId} />
+            <LiveCollabToggle noteId={activeNoteId} />
+            <CollabPill />
+            {streak.length >= 2 && (
+              <span
+                className="flex items-center gap-1 text-orange-400"
+                title={streak.includesToday
+                  ? `${streak.length}-day daily-note streak — keep it going!`
+                  : `${streak.length}-day streak — write today's note to keep it alive.`}
+                data-testid="status-bar-streak"
+              >
+                <FireIcon className="w-3 h-3" />
+                <span>{streak.length}d</span>
+              </span>
+            )}
+            {note && (
+              <>
+                {tagCount > 0 && <span>{tagCount} tag{tagCount === 1 ? '' : 's'}</span>}
+                <span>{wordCount} word{wordCount === 1 ? '' : 's'}</span>
+                <span>{charCount} char{charCount === 1 ? '' : 's'}</span>
+                <span>Modified {formatDate(note.updatedAt)}</span>
+              </>
+            )}
+          </>
         )}
-        {tagCount > 0 && <span>{tagCount} tag{tagCount === 1 ? '' : 's'}</span>}
-        <span>{wordCount} word{wordCount === 1 ? '' : 's'}</span>
-        <span>{charCount} char{charCount === 1 ? '' : 's'}</span>
-        <span>Modified {formatDate(note.updatedAt)}</span>
       </div>
     </div>
   )
 }
 
+// Feature A — "Share" affordance. Visible ONLY when live collaboration is
+// configured (getConfiguredUrl() non-null) AND a note is open. Clicking it
+// mints (or reuses) the note's stable collabId, copies a share link to the
+// clipboard, and confirms with a toast. Anyone who opens that link joins the
+// same room and can edit the note live — the UUID room id is the only
+// credential, so nothing else is leaked.
+function ShareCollabButton({ noteId }: { noteId: string | null }) {
+  const url = getConfiguredUrl()
+  if (!url || !noteId) return null
+
+  const onShare = async () => {
+    const collabId = useNoteStore.getState().ensureCollabId(noteId)
+    if (!collabId) return
+    const note = useNoteStore.getState().notes.find(n => n.id === noteId)
+    const origin = typeof window !== 'undefined' ? window.location.origin : ''
+    const link = buildCollabShareLink(origin, collabId, note?.title)
+    try {
+      await navigator.clipboard.writeText(link)
+    } catch {
+      // Clipboard API unavailable (insecure context / older browser) — fall
+      // back to a prompt so the user can still copy the link by hand.
+      window.prompt('Copy this collaboration link:', link)
+    }
+    useToastStore.getState().addToast({
+      kind: 'success',
+      message: 'Collaboration link copied. Anyone with the link can edit this note live.',
+    })
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onShare}
+      className="flex items-center gap-1 hover:text-obsidianText transition-colors"
+      title="Copy a live-collaboration link for this note. Anyone with the link can edit it live."
+      data-testid="status-bar-collab-share"
+    >
+      <ShareIcon className="w-3 h-3" />
+      <span>Share</span>
+    </button>
+  )
+}
+
+// Per-note "Live" toggle for the `per-note` collaboration mode. This is the
+// SINGLE control for live collaboration in per-note mode: one button that both
+// flips the note live/solo AND reflects the current state (label + green dot +
+// connection health), so there is no separate status badge competing with it.
+// It gates the yjs connection in per-note mode (the editor only dials a room
+// for a note the user has activated, keeping every other note solo + fast).
+// Visible ONLY when:
+//   - the transport is configured (getConfiguredUrl() non-null), AND
+//   - collaborationMode === 'per-note', AND
+//   - a note is open.
+// In 'off' mode there's nothing to toggle; in 'repo' mode every note is live
+// already so a per-note switch would be misleading — the CollabPill carries
+// the status there instead (and the pill suppresses itself in per-note mode so
+// the two never both show "Live: on" at once).
+function LiveCollabToggle({ noteId }: { noteId: string | null }) {
+  const mode = useSettingsStore(s => s.collaborationMode)
+  const active = useActiveCollabStore(s => (noteId ? s.activeNoteIds.has(noteId) : false))
+  const toggle = useActiveCollabStore(s => s.toggle)
+  // The WebSocket probe health, so the live button can show connecting/
+  // retrying/unreachable on the SAME control instead of a separate pill.
+  const { status, attempts } = useCollaboration()
+  const url = getConfiguredUrl()
+  if (!url || !noteId || mode !== 'per-note') return null
+
+  // When the note is OFF, the button is a plain "Go live" affordance. When it
+  // is ON, the label + colour + tooltip reflect the live connection state, so
+  // state is shown exactly once here rather than duplicated in a status badge.
+  const label = !active
+    ? 'Go live'
+    : status === 'connecting'
+      ? 'Live: connecting…'
+      : status === 'disconnected'
+        ? attempts > 0 ? `Live: retrying (${attempts}/5)` : 'Live: paused'
+        : status === 'error'
+          ? 'Live: unreachable'
+          : 'Live: on'
+  const color = !active
+    ? 'hover:text-obsidianText'
+    : status === 'connected'
+      ? 'text-green-500'
+      : status === 'error'
+        ? 'text-red-400'
+        : 'text-amber-400'
+  const liveOn = active && status === 'connected'
+
+  return (
+    <button
+      type="button"
+      onClick={() => toggle(noteId)}
+      className={`flex items-center gap-1 transition-colors ${color}`}
+      title={active
+        ? `Live collaboration is ON for this note (${label.replace(/^Live: /, '')}). Click to stop sharing edits and return to solo editing.`
+        : 'Turn ON live collaboration for this note. Edits sync in real time with anyone who has its share link. Other notes stay solo.'}
+      data-testid="status-bar-collab-toggle"
+      aria-pressed={active}
+    >
+      {liveOn ? <SignalIcon className="w-3 h-3" /> : <SignalSlashIcon className="w-3 h-3" />}
+      <span>{active ? 'Stop live' : 'Go live'}</span>
+    </button>
+  )
+}
+
 // Tiny presence pill — shows the live-collab WebSocket health when
-// NEXT_PUBLIC_YJS_WS_URL is configured. Hidden when collab is off so
-// the footer stays uncluttered for the default single-user case.
+// collaboration is connecting/connected (mode !== 'off' and a transport is
+// configured). Hidden when collab is off so the footer stays uncluttered for
+// the default single-user case. ALSO hidden in 'per-note' mode: there the
+// LiveCollabToggle is the single control and already carries the live status,
+// so showing the pill too would duplicate the "Live: on" indicator.
 function CollabPill() {
+  const mode = useSettingsStore(s => s.collaborationMode)
   const { status, attempts, url } = useCollaboration()
-  if (status === 'off' || url == null) return null
+  if (status === 'off' || url == null || mode === 'per-note') return null
 
   const labelByStatus: Record<Exclude<typeof status, 'off'>, string> = {
     connecting: 'Live: connecting…',

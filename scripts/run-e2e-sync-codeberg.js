@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 // Runner for the live Codeberg/Forgejo-sync E2E harness
 // (src/__tests__/e2eSyncLiveCodeberg.test.ts).
 //

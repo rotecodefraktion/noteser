@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Sidebar, Ribbon, RightRibbon, RightSidebarStack, RightSidebarResizeHandle, MobileTopBar, DrawerHandle, SidebarResizeHandle } from '@/components/sidebar'
-import { Editor } from '@/components/editor'
+import { Editor, EditorFooter } from '@/components/editor'
 import { Toaster } from '@/components/ui'
 
 // Modals are code-split out of the route's first-load bundle. Each one
@@ -40,6 +40,7 @@ import { useUIStore, useWorkspaceStore, useGitHubStore, DEFAULT_SIDEBAR_WIDTH, D
 import { switchVault } from '@/utils/switchVault'
 import { notesKey } from '@/utils/repoStorage'
 import { useNoteStore } from '@/stores/noteStore'
+import { useActiveCollabStore } from '@/stores/activeCollabStore'
 import { STORAGE_KEYS } from '@/utils/storageKeys'
 import { installTestHooks } from '@/utils/testHooks'
 import { shouldTrackSwipe, detectSwipeAction } from '@/utils/edgeSwipe'
@@ -263,16 +264,29 @@ export default function Home() {
   // a real note id, open that note as the active tab on first hydration.
   // Fires once per page load; subsequent state changes do not re-open
   // (a user closing the tab should NOT have it bounce back).
+  //
+  // noteStore persists to IndexedDB, so its rehydration is ASYNC and
+  // usually lands after `hydrated` flips true. Looking notes up at that
+  // point finds an empty array and the startup note silently never
+  // opened (#183). Wait for the persist middleware to finish hydrating
+  // before resolving the id.
   const startupNoteOpenedRef = useRef(false)
   useEffect(() => {
     if (!hydrated) return
-    if (startupNoteOpenedRef.current) return
-    const startupNoteId = useSettingsStore.getState().startupNoteId
-    if (!startupNoteId) return
-    const note = useNoteStore.getState().notes.find(n => n.id === startupNoteId && !n.isDeleted)
-    if (!note) return
-    startupNoteOpenedRef.current = true
-    useWorkspaceStore.getState().openNote(note.id, { preview: false })
+    const tryOpen = () => {
+      if (startupNoteOpenedRef.current) return
+      const startupNoteId = useSettingsStore.getState().startupNoteId
+      if (!startupNoteId) return
+      const note = useNoteStore.getState().notes.find(n => n.id === startupNoteId && !n.isDeleted)
+      if (!note) return
+      startupNoteOpenedRef.current = true
+      useWorkspaceStore.getState().openNote(note.id, { preview: false })
+    }
+    if (useNoteStore.persist.hasHydrated()) {
+      tryOpen()
+      return
+    }
+    return useNoteStore.persist.onFinishHydration(tryOpen)
   }, [hydrated])
 
   // Import-from-share: when the URL has `?import=<fragment>`, decode it
@@ -307,6 +321,43 @@ export default function Home() {
     })()
   }, [hydrated])
 
+  // Join-collab-session (Feature A): when the URL has `?collab=<id>` open (or
+  // create) the local note bound to that room. If a note with this collabId
+  // already exists we just open it; otherwise we materialise an EMPTY local
+  // note seeded with the collabId (+ the title from the link, if any) and let
+  // the live-collab binding pull the room's current content over the wire — we
+  // deliberately do NOT seed any local body for a joiner, so the seed-on-empty
+  // logic in collabExtension never fires on their side. The params are stripped
+  // afterwards so a refresh does not re-trigger the join.
+  useEffect(() => {
+    if (!hydrated) return
+    if (typeof window === 'undefined') return
+    const open = async () => {
+      const { parseCollabParam } = await import('@/utils/collabShare')
+      const parsed = parseCollabParam(window.location.search)
+      if (!parsed) return
+      const existing = useNoteStore.getState().notes.find(
+        n => n.collabId === parsed.collabId && !n.isDeleted,
+      )
+      const noteId = existing
+        ? existing.id
+        : useNoteStore.getState().addNote({
+            title: parsed.title || 'Shared note',
+            folderId: null,
+            content: '',
+            collabId: parsed.collabId,
+          }).id
+      useWorkspaceStore.getState().openNote(noteId, { preview: false })
+      // Arriving via a share link is an explicit collaboration intent: mark
+      // the note active so the editor dials the room under 'per-note' mode
+      // (in 'repo' mode it would connect anyway; in 'off' mode collab stays
+      // dormant by design and the user must opt in via Settings first).
+      useActiveCollabStore.getState().activate(noteId)
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+    void open()
+  }, [hydrated])
+
   // Migrate old data on first load. Async-yielding migration so a
   // legacy vault with hundreds of notes does not block first paint on
   // iOS (the watchdog kills any task held longer than its window).
@@ -315,6 +366,12 @@ export default function Home() {
     void migrateOldData().then(() => {
       bootMark('migrate:end')
       bootMeasure('migrate', 'migrate:start', 'migrate:end')
+      // One-time #179 migration: retro-flag legacy feature-tour screenshots
+      // as doNotSync so they stop pushing to the user's vault repo. Dynamic
+      // import + fire-and-forget — best-effort, off the first-paint path.
+      void import('@/utils/featureTourNote').then(({ flagLegacyTourAttachments }) =>
+        flagLegacyTourAttachments(),
+      )
     })
   }, [])
 
@@ -561,6 +618,10 @@ export default function Home() {
           <Editor />
         </div>
 
+        {/* App-wide status bar — single instance at the very bottom
+            (VS Code style); the panes themselves no longer carry one. */}
+        <EditorFooter />
+
         {/* Modals are portaled to body so the column layout doesn't
             affect their positioning. Same set as desktop. */}
         {renderModals()}
@@ -569,7 +630,11 @@ export default function Home() {
   }
 
   return (
-    <div className="flex h-dvh w-screen bg-obsidianBlack text-obsidianText overflow-hidden">
+    <div className="flex flex-col h-dvh w-screen bg-obsidianBlack text-obsidianText overflow-hidden">
+      {/* Main row: ribbons + sidebars + editor. The app-wide status bar
+          sits BELOW this row so it spans the full window width (VS Code
+          placement) instead of rendering once per editor pane. */}
+      <div className="flex flex-1 min-h-0 w-full overflow-hidden">
       {/* Ribbon (Activity Bar). Always visible on desktop — when the
           sidebar is collapsed only the panel CONTENT hides, the bar
           stays so you can re-open or switch panels with one click.
@@ -629,6 +694,9 @@ export default function Home() {
       <div className="flex-none">
         <RightRibbon />
       </div>
+      </div>
+
+      <EditorFooter />
 
       {renderModals()}
     </div>

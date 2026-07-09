@@ -13,6 +13,7 @@ import {
   mondayOfIsoWeek,
 } from '@/utils/calendarGrid'
 import { openWeekNote, findWeeklyNoteId } from '@/utils/periodicNotes'
+import { resolveTemplateContent } from '@/utils/templateResolve'
 import { CalendarDayContextMenu } from './CalendarDayContextMenu'
 
 const MONTH_NAMES = [
@@ -52,7 +53,6 @@ export const CalendarView = () => {
   const openModal = useUIStore(s => s.openModal)
   const ensureFolderPath = useFolderStore(s => s.ensureFolderPath)
   const dateFormat = useSettingsStore(s => s.dailyNoteDateFormat)
-  const dailyTemplateId = useSettingsStore(s => s.dailyNoteTemplateId)
   const weekStartDay = useSettingsStore(s => s.calendarWeekStartDay)
 
   const [menu, setMenu] = useState<CellMenuState | null>(null)
@@ -115,8 +115,8 @@ export const CalendarView = () => {
     [activeNotes, year, month, dateFormat, ensureFolderPath],
   )
 
-  const openDay = (day: number) => {
-    const dayDate = new Date(year, month, day)
+  const openDay = (day: number, dayYear: number = year, dayMonth: number = month) => {
+    const dayDate = new Date(dayYear, dayMonth, day)
     const title = formatDate(dayDate, dateFormat || 'YYYY-MM-DD')
     const folderId = ensureFolderPath(dailyNotesFolder.get().split('/'))
     const existing = activeNotes.find(n => n.folderId === folderId && n.title === title)
@@ -124,20 +124,17 @@ export const CalendarView = () => {
       openNote(existing.id)
       return
     }
-    const template = dailyTemplateId
-      ? notes.find(n => !n.isDeleted && n.id === dailyTemplateId)
-      : undefined
     const created = addNote({
       title,
       folderId,
-      content: template?.content ?? '',
+      content: resolveTemplateContent('daily') ?? '',
     })
     openNote(created.id)
   }
 
   const goToToday = () => {
     setViewDate(new Date(today.getFullYear(), today.getMonth(), 1))
-    openDay(today.getDate())
+    openDay(today.getDate(), today.getFullYear(), today.getMonth())
   }
 
   const onDayContextMenu = (e: React.MouseEvent, day: number) => {

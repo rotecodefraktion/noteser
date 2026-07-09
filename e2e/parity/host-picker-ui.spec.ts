@@ -37,7 +37,6 @@ test.describe('Host-picker UI — vault connect modal', () => {
 
     // Open the modal directly via the store — avoids fragile sidebar nav.
     await page.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(window as any).__noteser_test.stores.uiStore
         .getState()
         .openModal({ type: 'github-auth' })

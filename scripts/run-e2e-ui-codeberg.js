@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
 // Runner for the LIVE Codeberg UI walkthrough (e2e/live/codeberg-ui-connect.spec.ts).
 //
 // Loads the test token from ~/.config/noteser/codeberg-test-token.env into the

@@ -34,7 +34,6 @@ test.describe('LIVE — connect a Codeberg vault via the host picker', () => {
 
     // Open the connect modal directly via the store (stable; avoids sidebar nav).
     await page.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       ;(window as any).__noteser_test.stores.uiStore.getState().openModal({ type: 'github-auth' })
     })
 
@@ -55,7 +54,6 @@ test.describe('LIVE — connect a Codeberg vault via the host picker', () => {
       .poll(
         () =>
           page.evaluate(() => {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const s = (window as any).__noteser_test.stores.githubStore.getState()
             return { host: s.host, baseUrl: s.baseUrl, hasToken: !!s.token, login: s.user?.login ?? null }
           }),
@@ -64,7 +62,6 @@ test.describe('LIVE — connect a Codeberg vault via the host picker', () => {
       .toMatchObject({ host: 'forgejo', baseUrl: 'https://codeberg.org', hasToken: true })
 
     const connected = await page.evaluate(() => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const s = (window as any).__noteser_test.stores.githubStore.getState()
       return { login: s.user?.login ?? null }
     })
